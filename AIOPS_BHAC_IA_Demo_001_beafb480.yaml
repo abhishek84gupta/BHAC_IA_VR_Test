@@ -1,0 +1,25 @@
+- name: Install RHEL security advisory RHSA updates for glibc
+  hosts: rhel_servers
+  become: yes
+  tasks:
+    - name: Navigate to the directory where the update file was downloaded
+      shell: cd /path/to/downloaded/update
+      args:
+        chdir: /path/to/downloaded/update
+      become_user: root
+
+    - name: Install the update
+      shell: rpm -Uvh glibc-update.rpm
+      args:
+        chdir: /path/to/downloaded/update
+      become_user: root
+
+    - name: Verify the installation
+      shell: rpm -q glibc
+      register: install_check
+      become_user: root
+
+    - name: Display installation status
+      debug:
+        msg: "{{ install_check.stdout }}"
+      become_user: root
