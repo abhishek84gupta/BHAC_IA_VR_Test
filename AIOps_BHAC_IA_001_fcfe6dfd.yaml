@@ -1,0 +1,25 @@
+- name: Install Update on Windows Server 2016
+  hosts: windows_servers
+  gather_facts: no
+  tasks:
+    - name: Navigate to the directory where the update file was downloaded
+      win_shell: |
+        cd C:\path\to\update\file
+      register: directory_change
+
+    - name: Run the installation command
+      win_shell: |
+        .\update_file.exe
+      when: directory_change.changed
+      register: installation_result
+
+    - name: Verify the installation
+      win_shell: |
+        Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{update_guid}"
+      when: installation_result.changed
+      register: verification_result
+
+    - name: Display installation status
+      debug:
+        msg: "Installation status: {{ verification_result.stdout }}"
+      when: installation_result.changed
