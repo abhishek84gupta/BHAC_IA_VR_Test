@@ -1,4 +1,4 @@
-- name: Install RHEL security advisory RHSA updates for glibc
+- name: Install RHEL security advisory RHSA update for glibc
   hosts: rhel_servers
   become: yes
   tasks:
