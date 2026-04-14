@@ -1,5 +1,5 @@
 - name: Remediate Vulnerabilities
-  hosts: target_host
+  hosts: sl-ac4-solqa-ia-08
   tasks:
     - name: Print "Remediated Vulnerabilities"
       debug:
