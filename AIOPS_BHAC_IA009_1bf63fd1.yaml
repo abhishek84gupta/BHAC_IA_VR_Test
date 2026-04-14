@@ -1,0 +1,14 @@
+- name: Remediate Vulnerabilities
+  hosts: target_host
+  tasks:
+    - name: Print "Remediated Vulnerabilities"
+      debug:
+        msg: "Remediated Vulnerabilities"
+
+- name: Run the Playbook
+  hosts: target_host
+  tasks:
+    - name: Execute the playbook
+      shell: ansible-playbook /path/to/playbook.yml
+      args:
+        chdir: /path/to/playbook_directory
