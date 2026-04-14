@@ -1,0 +1,17 @@
+- name: Update and reboot CentOS Linux system
+  hosts: linux_servers
+  become: yes
+  tasks:
+    - name: Update the kernel
+      yum:
+        name: kernel
+        state: latest
+
+    - name: Reboot the system
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+      when: "'kernel' in ansible_facts.packages"
+
+    - name: Wait for the system to come back online
+      ansible.builtin.wait_for_connection:
+        timeout: 300
