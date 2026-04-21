@@ -1,0 +1,33 @@
+- name: Install Update on Linux System
+  hosts: linux_servers
+  become: yes
+  tasks:
+    - name: Navigate to the directory where the update file was downloaded
+      ansible.builtin.file:
+        path: /path/to/downloaded/update_file
+        state: directory
+        mode: '0755'
+
+    - name: Install the update
+      ansible.builtin.shell: |
+        if [ -f /path/to/downloaded/update_file ]; then
+          if command -v yum &> /dev/null; then
+            sudo yum install -y /path/to/downloaded/update_file
+          elif command -v apt &> /dev/null; then
+            sudo apt install -y /path/to/downloaded/update_file
+          else
+            echo "Unsupported package manager"
+          fi
+        else
+          echo "Update file not found"
+        fi
+      args:
+        executable: /bin/bash
+      register: install_output
+
+    - name: Check if the installation was successful
+      ansible.builtin.assert:
+        that:
+          - "'Successfully installed' in install_output.stdout"
+        fail_msg: "Installation of the update failed"
+        success_msg: "Installation of the update was successful"
