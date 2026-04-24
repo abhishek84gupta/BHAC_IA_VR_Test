@@ -1,0 +1,24 @@
+---
+- name: Install or uninstall package on RHEL servers
+  hosts: "{{ target_hosts }}"
+  become: yes
+
+  tasks:
+    - name: Ensure required variables are provided
+      fail:
+        msg: "You must provide 'package_name' and 'package_action' variables."
+      when: package_name is not defined or package_action is not defined
+
+    - name: Validate package_action parameter
+      fail:
+        msg: "Invalid action '{{ package_action }}'. Allowed values are 'install' or 'uninstall'."
+      when: package_action not in ['install', 'uninstall']
+
+    - name: Install or uninstall package based on action
+      yum:
+        name: "{{ package_name }}"
+        state: "{{ 'present' if package_action == 'install' else 'absent' }}"
+
+    - name: Show result
+      debug:
+        msg: "Package {{ package_name }} {{ 'installed' if package_action == 'install' else 'removed' }}"
