@@ -1,0 +1,6 @@
+- name: Remediate Vulnerabilities on sl-ac4-solqa-ia-08
+  hosts: sl-ac4-solqa-ia-08
+  tasks:
+    - name: Print Remediated Vulnerabilities
+      debug:
+        msg: "Remediated Vulnerabilities"
