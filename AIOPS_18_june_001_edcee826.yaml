@@ -3,4 +3,4 @@
   tasks:
     - name: Print Remediated Vulnerabilities
       debug:
-        msg: "Remediated Vulnerabilities"
+        msg: "Remediated 2 Vulnerabilities"
