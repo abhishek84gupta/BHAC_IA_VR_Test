@@ -1,0 +1,6 @@
+- name: Remediate Vulnerabilities on sl-ac4-solqa-ia-08.bmc.com
+  hosts: sl-ac4-solqa-ia-08.bmc.com
+  tasks:
+    - name: Print Remediated Vulnerabilities
+      debug:
+        msg: "Remediated new Vulnerabilities"
