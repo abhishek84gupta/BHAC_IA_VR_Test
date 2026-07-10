@@ -1,9 +1,11 @@
-- name: My first play
-  hosts: "{{ target_hosts | default('all') }}"
+- name: Network ping from AWX controller
+  hosts: localhost
+  gather_facts: false
   tasks:
-   - name: Ping my hosts
-     ansible.builtin.ping:
- 
-   - name: Print message
-     ansible.builtin.debug:
-      msg: Hello world
+    - name: ICMP ping target
+      ansible.builtin.command: ping -c 4 {{ target_hosts }}
+      register: ping_result
+
+    - name: Show ping output
+      ansible.builtin.debug:
+        var: ping_result.stdout_lines
