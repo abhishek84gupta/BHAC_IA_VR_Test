@@ -1,0 +1,101 @@
+---
+# Playbook: Scale a Kubernetes Deployment (replica count) via REST API
+# Purpose: PATCH the deployment to set spec.replicas (same cluster / auth pattern as Get-K8s-Pod-Logs)
+#
+# Required extra_vars:
+#   - k8s_namespace: Kubernetes namespace
+#   - k8s_deployment_name: Deployment name
+#   - k8s_replicas: Target number of replicas (integer, 0 or higher)
+#
+# Token: hardcoded in play vars (override with -e k8s_token=... if needed). Rotate if exposed.
+#
+# Optional extra_vars:
+#   - k8s_api_base: Override API base (default matches Get-K8s-Pod-Logs)
+#
+# CLI example:
+#   ansible-playbook playbooks/Scale-K8s-Deployment.yml \
+#     -e "k8s_namespace=default" \
+#     -e "k8s_deployment_name=my-app" \
+#     -e "k8s_replicas=3"
+#
+# No inventory: runs on localhost only.
+
+- name: Scale deployment via Kubernetes API
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    _default_k8s_api_base: "https://aus-itrnch-01.k8s.bmc.com/k8s/clusters/c-gbl9h"
+    k8s_token: "kubeconfig-u-a7m2uqizmv7c9bj:7vw2dpqlldhjbv8t6269q9qfvbwvgx65tn2n6c2k2p9bf9kxjqs46b"
+
+  tasks:
+    - name: Resolve Kubernetes API base (extra_vars or default)
+      set_fact:
+        k8s_api_base: "{{ k8s_api_base | default(_default_k8s_api_base) }}"
+
+    - name: Validate required extra_vars
+      fail:
+        msg: "Set k8s_namespace, k8s_deployment_name, and k8s_replicas via extra_vars (or AWX survey)."
+      when: >
+        k8s_namespace is not defined or k8s_namespace | length == 0 or
+        k8s_deployment_name is not defined or k8s_deployment_name | length == 0 or
+        k8s_replicas is not defined
+
+    - name: Normalize replica count
+      set_fact:
+        _replicas: "{{ k8s_replicas | int }}"
+
+    - name: Validate replicas is non-negative
+      fail:
+        msg: "k8s_replicas must be an integer >= 0 (got {{ k8s_replicas }})."
+      when: _replicas | int < 0
+
+    - name: Build deployment patch URL
+      set_fact:
+        k8s_scale_url: >-
+          {{ k8s_api_base }}/apis/apps/v1/namespaces/{{ k8s_namespace | urlencode }}/deployments/{{ k8s_deployment_name | urlencode }}
+
+    - name: Scale deployment (merge patch replicas)
+      uri:
+        url: "{{ k8s_scale_url }}"
+        method: PATCH
+        body_format: json
+        body:
+          spec:
+            replicas: "{{ _replicas | int }}"
+        headers:
+          Authorization: "Bearer {{ k8s_token }}"
+          Content-Type: "application/merge-patch+json"
+          Accept: "application/json"
+        return_content: true
+        status_code: [200]
+        validate_certs: true
+      register: scale_response
+
+    - name: Extract safe fields from API response (missing json/metadata/status safe)
+      set_fact:
+        _scale_meta: "{{ (scale_response.json | default({})).metadata | default({}) }}"
+        _scale_status: "{{ (scale_response.json | default({})).status | default({}) }}"
+
+    - name: Show scale result summary
+      debug:
+        msg:
+          - "Deployment {{ k8s_deployment_name }} in namespace {{ k8s_namespace }} scaled to {{ _replicas }} replica(s)."
+          - "Observed generation: {{ _scale_meta.generation if _scale_meta.generation is defined else 'n/a' }}"
+          - "Status replicas (desired): {{ _scale_status.replicas if _scale_status.replicas is defined else 'n/a' }} / ready: {{ _scale_status.readyReplicas if _scale_status.readyReplicas is defined else 'n/a' }}"
+
+    - name: Set stats for job template caller
+      set_stats:
+        data:
+          k8s_namespace: "{{ k8s_namespace }}"
+          k8s_deployment_name: "{{ k8s_deployment_name }}"
+          k8s_replicas: "{{ _replicas | int }}"
+          deployment_uid: "{{ _scale_meta.uid | default('', true) }}"
+          # Use is defined for numeric fields so 0 is not treated as missing (default filter falsy issue)
+          observed_generation: "{{ _scale_meta.generation if _scale_meta.generation is defined else '' }}"
+          status_replicas: "{{ _scale_status.replicas if _scale_status.replicas is defined else '' }}"
+          ready_replicas: "{{ _scale_status.readyReplicas if _scale_status.readyReplicas is defined else '' }}"
+          status: "SUCCESS"
+        aggregate: false
+        per_host: false

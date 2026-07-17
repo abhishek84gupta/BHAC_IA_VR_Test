@@ -1,0 +1,131 @@
+---
+# Playbook: Get Disk Usage Summary
+# Purpose: Connect to a remote host over SSH and retrieve high-level disk usage analysis
+
+# Play 1: Add target host to runtime inventory
+- name: Initialize target host
+  hosts: localhost
+  gather_facts: no
+  connection: local
+
+  tasks:
+    - name: Validate target_host is provided
+      fail:
+        msg: "target_host is required. Provide via extra_vars: -e 'target_host=server.example.com'"
+      when: target_host is not defined or target_host == ""
+
+    - name: Add target host to runtime inventory
+      add_host:
+        name: "{{ target_host }}"
+        groups: target_servers
+        ansible_host: "{{ target_host }}"
+        ansible_user: "{{ ansible_user | default(omit) }}"
+        ansible_password: "{{ ansible_password | default(omit) }}"
+        ansible_port: "{{ ansible_port | default(22) }}"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+        ansible_connection: "{{ 'local' if target_host in ['localhost', '127.0.0.1'] else 'ssh' }}"
+
+# Play 2: Collect disk usage from target host
+- name: Get disk usage analysis summary
+  hosts: target_servers
+  gather_facts: yes
+  become: yes
+
+  tasks:
+    - name: Get filesystem usage
+      shell: df -BG --output=target,size,used,avail,pcent | tail -n +2
+      register: fs_raw
+      changed_when: false
+
+    - name: Get root filesystem stats
+      shell: df -BG / | tail -1 | awk '{gsub(/G/,""); gsub(/%/,""); print $2","$3","$4","$5}'
+      register: root_raw
+      changed_when: false
+
+    - name: Parse root filesystem stats
+      set_fact:
+        root_total_gb: "{{ root_raw.stdout.split(',')[0] }}"
+        root_used_gb: "{{ root_raw.stdout.split(',')[1] }}"
+        root_avail_gb: "{{ root_raw.stdout.split(',')[2] }}"
+        root_use_percent: "{{ root_raw.stdout.split(',')[3] }}"
+
+    - name: Get top 5 largest directories under /
+      shell: du -BG --max-depth=1 / 2>/dev/null | sort -rn | head -6 | tail -5
+      register: top_dirs_raw
+      changed_when: false
+
+    - name: Get /tmp and /var/tmp usage
+      shell: du -sh /tmp /var/tmp 2>/dev/null
+      register: tmp_raw
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Get inode usage for root
+      shell: df -i / | tail -1 | awk '{print $5}' | tr -d '%'
+      register: inode_raw
+      changed_when: false
+
+    - name: Determine disk health
+      set_fact:
+        disk_health: >-
+          {% if root_use_percent | int >= 90 %}CRITICAL
+          {% elif root_use_percent | int >= 80 %}WARNING
+          {% elif root_use_percent | int >= 70 %}ATTENTION
+          {% else %}HEALTHY{% endif %}
+
+    - name: Display disk usage summary
+      debug:
+        msg:
+          - "=================================="
+          - "     DISK USAGE SUMMARY"
+          - "=================================="
+          - "Host: {{ inventory_hostname }}"
+          - "OS: {{ ansible_distribution | default('Unknown') }} {{ ansible_distribution_version | default('') }}"
+          - ""
+          - "--- Root Filesystem (/) ---"
+          - "Total: {{ root_total_gb }} GB"
+          - "Used: {{ root_used_gb }} GB ({{ root_use_percent }}%)"
+          - "Available: {{ root_avail_gb }} GB"
+          - "Inode Usage: {{ inode_raw.stdout }}%"
+          - "Health: {{ disk_health | trim }}"
+          - ""
+          - "--- Top Directories ---"
+          - "{{ top_dirs_raw.stdout }}"
+          - ""
+          - "--- Temp Directories ---"
+          - "{{ tmp_raw.stdout | default('N/A') }}"
+          - ""
+          - "--- All Filesystems ---"
+          - "{{ fs_raw.stdout }}"
+          - "=================================="
+
+    - name: Set disk usage statistics for job template caller
+      set_stats:
+        data:
+          result: |
+            DISK USAGE SUMMARY
+
+            Host: {{ inventory_hostname }}
+            OS: {{ ansible_distribution | default('Unknown') }} {{ ansible_distribution_version | default('') }}
+
+            Root Filesystem (/)
+            Total: {{ root_total_gb }} GB
+            Used: {{ root_used_gb }} GB ({{ root_use_percent }}%)
+            Available: {{ root_avail_gb }} GB
+            Inode Usage: {{ inode_raw.stdout }}%
+            Health: {{ disk_health | trim }}
+
+            Top Directories:
+            {{ top_dirs_raw.stdout }}
+
+            Temp Directories:
+            {{ tmp_raw.stdout | default('N/A') }}
+
+            All Filesystems:
+            {{ fs_raw.stdout }}
+
+            Timestamp: {{ ansible_date_time.iso8601 }}
+
+            Status: SUCCESS
+        aggregate: no
+        per_host: no

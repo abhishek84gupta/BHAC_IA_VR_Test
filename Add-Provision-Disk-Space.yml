@@ -1,0 +1,110 @@
+---
+# Playbook: Add/Provision Disk Space
+# Purpose: Dummy action to simulate disk space provisioning
+# 
+# CLI Examples:
+#   ansible-playbook playbooks/Add-Provision-Disk-Space.yml
+#   ansible-playbook playbooks/Add-Provision-Disk-Space.yml -e "target_host=webserver.example.com"
+#   ansible-playbook playbooks/Add-Provision-Disk-Space.yml -e "target_host=192.168.1.100 disk_size_gb=100 mount_point=/data"
+# 
+# AWX/Tower Example:
+#   Extra Variables: {"target_host": "webserver.example.com", "disk_size_gb": 50, "mount_point": "/data"}
+#   Or omit target_host to use default: bcx-pun-fc649a5.bmc.com
+#
+# Note: This is a DUMMY playbook that simulates disk provisioning with a print message.
+#
+
+- name: Add/Provision disk space on server
+  hosts: "{{ target_host | default(default_target_host) }}"
+  become: yes
+  
+  vars:
+    default_target_host: "bcx-pun-fc649a5.bmc.com"
+    default_disk_size_gb: 50
+    default_mount_point: "/data"
+    default_filesystem_type: "ext4"
+    
+  tasks:
+    - name: Set disk provisioning configuration (use extra_vars or defaults)
+      set_fact:
+        disk_size_gb: "{{ disk_size_gb | default(default_disk_size_gb) | int }}"
+        mount_point: "{{ mount_point | default(default_mount_point) }}"
+        filesystem_type: "{{ filesystem_type | default(default_filesystem_type) }}"
+
+    - name: Validate disk size
+      fail:
+        msg: "❌ ERROR: Invalid disk_size_gb '{{ disk_size_gb }}'. Must be between 1-10000 GB"
+      when: disk_size_gb | int < 1 or disk_size_gb | int > 10000
+
+    - name: Display provisioning configuration
+      debug:
+        msg:
+          - "=================================="
+          - "  DISK PROVISIONING REQUEST"
+          - "=================================="
+          - "🎯 Target Host: {{ inventory_hostname }}"
+          - "💾 Disk Size: {{ disk_size_gb }} GB"
+          - "📁 Mount Point: {{ mount_point }}"
+          - "🗂️  Filesystem Type: {{ filesystem_type }}"
+          - "=================================="
+
+    - name: Simulate disk provisioning (DUMMY ACTION)
+      debug:
+        msg:
+          - "⚙️  Simulating disk provisioning on {{ inventory_hostname }}..."
+          - ""
+          - "Step 1: ✅ Allocating {{ disk_size_gb }} GB of disk space from storage pool"
+          - "Step 2: ✅ Creating new volume: /dev/sdb1"
+          - "Step 3: ✅ Formatting volume with {{ filesystem_type }} filesystem"
+          - "Step 4: ✅ Creating mount point: {{ mount_point }}"
+          - "Step 5: ✅ Mounting volume to {{ mount_point }}"
+          - "Step 6: ✅ Adding entry to /etc/fstab for persistence"
+          - "Step 7: ✅ Setting appropriate permissions"
+          - ""
+          - "✨ Disk provisioning completed successfully!"
+          - ""
+          - "⚠️  NOTE: This is a DUMMY action. No actual changes were made."
+
+    - name: Get current disk usage
+      shell: df -h
+      register: current_disk_usage
+      changed_when: false
+
+    - name: Display current disk usage
+      debug:
+        msg:
+          - "=================================="
+          - "  CURRENT DISK USAGE"
+          - "=================================="
+          - "{{ current_disk_usage.stdout_lines | join('\n') }}"
+          - "=================================="
+
+    - name: Set disk provisioning statistics for job template caller
+      set_stats:
+        data:
+          target_host: "{{ inventory_hostname }}"
+          disk_size_requested_gb: "{{ disk_size_gb }}"
+          mount_point: "{{ mount_point }}"
+          filesystem_type: "{{ filesystem_type }}"
+          provisioning_status: "SIMULATED"
+          action_type: "DUMMY"
+          message: "Disk provisioning simulated successfully for {{ inventory_hostname }}. No actual changes were made."
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          current_disk_usage: "{{ current_disk_usage.stdout_lines | to_json }}"
+          status: "SUCCESS"
+        aggregate: no
+        per_host: no
+
+    - name: Final summary
+      debug:
+        msg:
+          - "=================================="
+          - "   PROVISIONING SUMMARY"
+          - "=================================="
+          - "Host: {{ inventory_hostname }}"
+          - "Requested Disk Size: {{ disk_size_gb }} GB"
+          - "Mount Point: {{ mount_point }}"
+          - "Filesystem Type: {{ filesystem_type }}"
+          - "Status: ✅ SIMULATED (No actual changes)"
+          - "=================================="
+          - "📊 Stats have been set and can be retrieved by the job template caller"

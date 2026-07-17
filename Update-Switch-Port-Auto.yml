@@ -1,0 +1,53 @@
+---
+# Playbook: Update Switch Port Auto
+# Purpose: Mock 'set interface Port-channel201 negotiate auto' and publish results via set_stats
+#
+# CLI Example (no inventory required):
+#   ansible-playbook playbooks/Update-Switch-Port-Auto.yml -i localhost, -e "NetworkDevice=switch-core-01"
+#
+# AWX/Tower Extra Variables:
+#   {"NetworkDevice": "switch-core-01"}
+
+- name: Update switch port auto
+  hosts: localhost
+  gather_facts: no
+  connection: local
+
+  vars:
+    port_channel: Port-channel201
+    mock_set_interface_output: "Port-channel201 set to auto negotiate"
+
+  tasks:
+    - name: Validate NetworkDevice extra variable
+      ansible.builtin.fail:
+        msg: >-
+          NetworkDevice is required. Pass via extra vars, e.g.
+          -e "NetworkDevice=switch-core-01"
+      when: NetworkDevice is not defined or NetworkDevice | trim == ''
+
+    - name: Simulate set interface Port-channel201 negotiate auto
+      ansible.builtin.set_fact:
+        set_interface_output:
+          stdout:
+            - "{{ mock_set_interface_output }}"
+          stdout_lines:
+            - "{{ mock_set_interface_output.splitlines() }}"
+
+    - name: Publish update results for job template caller
+      ansible.builtin.set_stats:
+        data:
+          NetworkDevice: "{{ NetworkDevice }}"
+          command: "set interface {{ port_channel }} negotiate auto"
+          result: "{{ mock_set_interface_output }}"
+          port_name: "{{ port_channel }}"
+          negotiate_mode: auto
+          status: "SUCCESS"
+        aggregate: no
+        per_host: no
+
+    - name: Display update summary
+      ansible.builtin.debug:
+        msg:
+          - "Network Device: {{ NetworkDevice }}"
+          - "Command: set interface {{ port_channel }} negotiate auto"
+          - "{{ set_interface_output.stdout[0] }}"

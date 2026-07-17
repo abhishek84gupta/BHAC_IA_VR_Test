@@ -1,0 +1,115 @@
+---
+# Additional Playbook: Docker Container Management
+# Purpose: Manage Docker containers and clean up resources
+# Usage: ansible-playbook playbooks/15-docker-container-management.yml
+
+- name: Manage Docker containers
+  hosts: all
+  become: yes
+  
+  vars:
+    action: "status"  # status, cleanup, restart, stop
+    container_name: ""  # Specific container to manage
+    cleanup_unused: yes
+    remove_dangling_images: yes
+    
+  tasks:
+    - name: Check if Docker is installed
+      shell: command -v docker
+      register: docker_installed
+      ignore_errors: yes
+      changed_when: false
+      
+    - name: Fail if Docker is not installed
+      fail:
+        msg: "Docker is not installed on {{ inventory_hostname }}"
+      when: docker_installed.rc != 0
+      
+    - name: Get Docker version
+      shell: docker --version
+      register: docker_version
+      changed_when: false
+      
+    - name: List all containers
+      shell: docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
+      register: all_containers
+      changed_when: false
+      
+    - name: Display container status
+      debug:
+        msg: "{{ all_containers.stdout_lines }}"
+      when: action == "status"
+      
+    - name: Get running containers count
+      shell: docker ps -q | wc -l
+      register: running_count
+      changed_when: false
+      
+    - name: Get stopped containers count
+      shell: docker ps -aq -f status=exited | wc -l
+      register: stopped_count
+      changed_when: false
+      
+    - name: Restart specific container
+      docker_container:
+        name: "{{ container_name }}"
+        state: started
+        restart: yes
+      when: 
+        - action == "restart"
+        - container_name != ""
+      register: container_restart
+      
+    - name: Stop specific container
+      docker_container:
+        name: "{{ container_name }}"
+        state: stopped
+      when: 
+        - action == "stop"
+        - container_name != ""
+      register: container_stop
+      
+    - name: Cleanup stopped containers
+      shell: docker container prune -f
+      when: 
+        - action == "cleanup"
+        - cleanup_unused
+      register: container_cleanup
+      
+    - name: Remove dangling images
+      shell: docker image prune -f
+      when: 
+        - action == "cleanup"
+        - remove_dangling_images
+      register: image_cleanup
+      
+    - name: Remove unused volumes
+      shell: docker volume prune -f
+      when: 
+        - action == "cleanup"
+        - cleanup_unused
+      register: volume_cleanup
+      
+    - name: Remove unused networks
+      shell: docker network prune -f
+      when: 
+        - action == "cleanup"
+        - cleanup_unused
+      register: network_cleanup
+      
+    - name: Get Docker disk usage
+      shell: docker system df
+      register: docker_disk_usage
+      changed_when: false
+      
+    - name: Display Docker management summary
+      debug:
+        msg:
+          - "=== DOCKER MANAGEMENT SUMMARY for {{ inventory_hostname }} ==="
+          - "Docker version: {{ docker_version.stdout }}"
+          - "Running containers: {{ running_count.stdout }}"
+          - "Stopped containers: {{ stopped_count.stdout }}"
+          - "Action performed: {{ action }}"
+          - ""
+          - "Disk usage:"
+          - "{{ docker_disk_usage.stdout_lines }}"

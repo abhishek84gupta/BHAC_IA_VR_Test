@@ -1,0 +1,122 @@
+---
+# Playbook 8: Create Linux User
+# Purpose: Create a new user with specific configurations
+# Usage: ansible-playbook playbooks/08-create-linux-user.yml -e "username=newuser"
+
+- name: Create Linux user on remote servers
+  hosts: all
+  become: yes
+  
+  vars:
+    username: "deployuser"
+    user_password: "{{ 'defaultPassword123!' | password_hash('sha512') }}"
+    user_shell: "/bin/bash"
+    user_groups: "wheel,sudo"  # Additional groups (comma-separated)
+    create_home: yes
+    user_comment: "User created by Ansible"
+    generate_ssh_key: yes
+    ssh_key_bits: 2048
+    ssh_key_type: "rsa"
+    add_to_sudoers: yes
+    password_expire_days: 90
+    
+  tasks:
+    - name: Check if user already exists
+      getent:
+        database: passwd
+        key: "{{ username }}"
+      register: user_exists
+      ignore_errors: yes
+      
+    - name: Display message if user exists
+      debug:
+        msg: "User {{ username }} already exists on {{ inventory_hostname }}"
+      when: user_exists is succeeded
+      
+    - name: Create user
+      user:
+        name: "{{ username }}"
+        password: "{{ user_password }}"
+        shell: "{{ user_shell }}"
+        groups: "{{ user_groups }}"
+        append: yes
+        create_home: "{{ create_home }}"
+        comment: "{{ user_comment }}"
+        state: present
+      register: user_creation
+      when: user_exists is failed
+      
+    - name: Set password expiry
+      shell: "chage -M {{ password_expire_days }} {{ username }}"
+      when: user_creation is changed
+      
+    - name: Generate SSH key for user
+      user:
+        name: "{{ username }}"
+        generate_ssh_key: yes
+        ssh_key_bits: "{{ ssh_key_bits }}"
+        ssh_key_type: "{{ ssh_key_type }}"
+        ssh_key_comment: "{{ username }}@{{ inventory_hostname }}"
+      when: 
+        - generate_ssh_key
+        - user_creation is changed
+      register: ssh_key_gen
+      
+    - name: Create .ssh directory with correct permissions
+      file:
+        path: "/home/{{ username }}/.ssh"
+        state: directory
+        owner: "{{ username }}"
+        group: "{{ username }}"
+        mode: '0700'
+      when: user_creation is changed
+      
+    - name: Add user to sudoers
+      copy:
+        content: "{{ username }} ALL=(ALL) NOPASSWD: ALL\n"
+        dest: "/etc/sudoers.d/{{ username }}"
+        mode: '0440'
+        validate: 'visudo -cf %s'
+      when: 
+        - add_to_sudoers
+        - user_creation is changed
+        
+    - name: Set up authorized_keys file
+      file:
+        path: "/home/{{ username }}/.ssh/authorized_keys"
+        state: touch
+        owner: "{{ username }}"
+        group: "{{ username }}"
+        mode: '0600'
+      when: user_creation is changed
+      
+    - name: Get user information
+      getent:
+        database: passwd
+        key: "{{ username }}"
+      register: final_user_info
+      
+    - name: Display user creation results
+      debug:
+        msg:
+          - "User {{ username }} created successfully on {{ inventory_hostname }}"
+          - "Home directory: /home/{{ username }}"
+          - "Shell: {{ user_shell }}"
+          - "Groups: {{ user_groups }}"
+          - "SSH key generated: {{ 'yes' if (ssh_key_gen is defined and ssh_key_gen is changed) else 'no' }}"
+          - "Sudo access: {{ 'yes' if add_to_sudoers else 'no' }}"
+      when: user_creation is changed
+      
+    - name: Display SSH public key
+      slurp:
+        src: "/home/{{ username }}/.ssh/id_{{ ssh_key_type }}.pub"
+      register: ssh_pub_key
+      when: 
+        - generate_ssh_key
+        - ssh_key_gen is defined
+        - ssh_key_gen is changed
+        
+    - name: Show SSH public key
+      debug:
+        msg: "SSH Public Key: {{ ssh_pub_key.content | b64decode }}"
+      when: ssh_pub_key is defined and ssh_pub_key.content is defined

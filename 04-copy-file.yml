@@ -1,0 +1,100 @@
+---
+# Playbook 4: Copy File to Remote Server
+# Purpose: Copy a file from local machine to remote servers
+# Usage: ansible-playbook playbooks/04-copy-file.yml -e "target_host=<target_host> source_file=/path/to/local/file dest_path=/path/to/remote/destination"
+# Job Template Variables: target_host, source_file, dest_path
+
+- name: Copy file to remote servers
+  hosts: "{{ target_host }}"
+  become: yes
+  
+  vars:
+    # target_host: Required - target host to copy file to
+    # source_file: Required - source file path on control node
+    # dest_path: Required - destination path on remote server (must be absolute path)
+    file_owner: "root"                     # File owner
+    file_group: "root"                     # File group
+    file_mode: "0644"                      # File permissions
+    backup_existing: yes                   # Backup existing file
+    
+  tasks:
+    - name: Validate required variables
+      assert:
+        that:
+          - target_host is defined
+          - target_host | length > 0
+          - source_file is defined
+          - source_file | length > 0
+          - dest_path is defined
+          - dest_path | length > 0
+          - dest_path is match('^/')
+        fail_msg: |
+          ERROR: Required variables are missing, empty, or invalid!
+          - 'target_host' must be provided and not empty (Current: {{ target_host | default('NOT DEFINED') }})
+          - 'source_file' must be provided and not empty (Current: {{ source_file | default('NOT DEFINED') }})
+          - 'dest_path' must be provided, not empty, and an absolute path starting with '/' (Current: {{ dest_path | default('NOT DEFINED') }})
+          
+          Example valid values:
+            target_host: "server1.example.com"
+            source_file: "/local/path/file.txt"
+            dest_path: "/tmp/file.txt"
+        success_msg: "Required variables validated successfully"
+      run_once: true
+    - name: Check if source file exists
+      stat:
+        path: "{{ source_file }}"
+      register: source_file_stat
+      
+    - name: Fail if source file doesn't exist
+      fail:
+        msg: "Source file {{ source_file }} does not exist!"
+      when: not source_file_stat.stat.exists
+      
+    - name: Ensure destination directory exists
+      file:
+        path: "{{ dest_path | dirname }}"
+        state: directory
+        mode: '0755'
+        
+    - name: Check if destination file already exists
+      stat:
+        path: "{{ dest_path }}"
+      register: dest_file_stat
+      
+    - name: Display warning if file exists
+      debug:
+        msg: "WARNING: File {{ dest_path }} already exists and will be backed up"
+      when: 
+        - dest_file_stat.stat.exists
+        - backup_existing
+        
+    - name: Copy file on remote server
+      copy:
+        src: "{{ source_file }}"
+        dest: "{{ dest_path }}"
+        owner: "{{ file_owner }}"
+        group: "{{ file_group }}"
+        mode: "{{ file_mode }}"
+        backup: "{{ backup_existing }}"
+        remote_src: yes
+      register: copy_result
+      
+    - name: Verify file was copied successfully
+      stat:
+        path: "{{ dest_path }}"
+        checksum_algorithm: sha256
+      register: copied_file_stat
+      
+    - name: Display copy results
+      debug:
+        msg: 
+          - "File copied successfully to {{ target_host }}"
+          - "Destination: {{ dest_path }}"
+          - "Size: {{ copied_file_stat.stat.size }} bytes"
+          - "Checksum: {{ copied_file_stat.stat.checksum }}"
+      when: copy_result is changed
+      
+    - name: File already up to date message
+      debug:
+        msg: "File {{ dest_path }} is already up to date on {{ target_host }}"
+      when: copy_result is not changed

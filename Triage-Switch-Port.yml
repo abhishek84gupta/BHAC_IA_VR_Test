@@ -1,0 +1,78 @@
+---
+# Playbook: Triage Switch Port
+# Purpose: Mock 'show interface Port-channel201 status' and publish results via set_stats
+#
+# CLI Example (no inventory required):
+#   ansible-playbook playbooks/Triage-Switch-Port.yml -i localhost, -e "NetworkDevice=switch-core-01"
+#
+# AWX/Tower Extra Variables:
+#   {"NetworkDevice": "switch-core-01"}
+
+- name: Triage switch port
+  hosts: localhost
+  gather_facts: no
+  connection: local
+
+  vars:
+    port_channel: Port-channel201
+    mock_show_interface_status: |
+      Port      Name               Status       Vlan       Duplex  Speed   Type
+      0/1       Port-channel201    connected    trunk      half    1000    10/100/1000BaseTX
+      0 input errors, 0 CRC, 0 frame, 0 overrun, 0 ignored 1432 collisions, 521 late collisions, 0 deferred
+
+  tasks:
+    - name: Validate NetworkDevice extra variable
+      ansible.builtin.fail:
+        msg: >-
+          NetworkDevice is required. Pass via extra vars, e.g.
+          -e "NetworkDevice=switch-core-01"
+      when: NetworkDevice is not defined or NetworkDevice | trim == ''
+
+    - name: Simulate show interface Port-channel201 status
+      ansible.builtin.set_fact:
+        intf_status_output:
+          stdout:
+            - "{{ mock_show_interface_status }}"
+          stdout_lines:
+            - "{{ mock_show_interface_status.splitlines() }}"
+
+    - name: Parse port status fields
+      ansible.builtin.set_fact:
+        port_status_line: "{{ intf_status_output.stdout[0].splitlines()[1] }}"
+        error_counters_line: "{{ intf_status_output.stdout[0].splitlines()[2] }}"
+        port_name: Port-channel201
+        port_status: connected
+        port_vlan: trunk
+        port_duplex: half
+        port_speed: "1000"
+        port_type: 10/100/1000BaseTX
+        collision_count: "1432"
+        late_collision_count: "521"
+
+    - name: Publish triage results for job template caller
+      ansible.builtin.set_stats:
+        data:
+          NetworkDevice: "{{ NetworkDevice }}"
+          command: "show interface {{ port_channel }} status"
+          result: |
+            Port      Name               Status       Vlan       Duplex  Speed   Type
+            0/1       Port-channel201    connected    trunk      half    1000    10/100/1000BaseTX
+            0 input errors, 0 CRC, 0 frame, 0 overrun, 0 ignored 1432 collisions, 521 late collisions, 0 deferred
+          port_name: "{{ port_name }}"
+          port_status: "{{ port_status }}"
+          port_vlan: "{{ port_vlan }}"
+          port_duplex: "{{ port_duplex }}"
+          port_speed: "{{ port_speed }}"
+          port_type: "{{ port_type }}"
+          collision_count: "{{ collision_count }}"
+          late_collision_count: "{{ late_collision_count }}"
+          status: "SUCCESS"
+        aggregate: no
+        per_host: no
+
+    - name: Display triage summary
+      ansible.builtin.debug:
+        msg:
+          - "Network Device: {{ NetworkDevice }}"
+          - "Command: show interface {{ port_channel }} status"
+          - "{{ intf_status_output.stdout[0] }}"

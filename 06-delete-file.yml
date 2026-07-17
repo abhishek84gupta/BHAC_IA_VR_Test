@@ -1,0 +1,103 @@
+---
+# Playbook 6: Delete a File
+# Purpose: Safely delete a file from remote servers with backup option
+# Usage: ansible-playbook playbooks/06-delete-file.yml -e "target_host=<target_host> file_path=/path/to/file"
+# Job Template Variables: target_host, file_path
+
+- name: Delete file from remote servers
+  hosts: "{{ target_host }}"
+  become: yes
+  
+  vars:
+    # target_host: Required - target host to delete file from
+    # file_path: Required - path of the file to delete (must be absolute path)
+    create_backup: yes              # Create backup before deletion
+    backup_dir: "/tmp/ansible_backups"
+    verify_before_delete: yes        # Extra safety check
+    
+  tasks:
+    - name: Validate required variables
+      assert:
+        that:
+          - target_host is defined
+          - target_host | length > 0
+          - file_path is defined
+          - file_path | length > 0
+          - file_path is match('^/')
+        fail_msg: |
+          ERROR: Required variables are missing, empty, or invalid!
+          - 'target_host' must be provided and not empty (Current: {{ target_host | default('NOT DEFINED') }})
+          - 'file_path' must be provided, not empty, and an absolute path starting with '/' (Current: {{ file_path | default('NOT DEFINED') }})
+          
+          Example valid values:
+            target_host: "server1.example.com"
+            file_path: "/tmp/file_to_delete.txt"
+        success_msg: "Required variables validated successfully"
+      run_once: true
+    - name: Check if file exists
+      stat:
+        path: "{{ file_path }}"
+      register: file_stat
+      
+    - name: Display message if file doesn't exist
+      debug:
+        msg: "File {{ file_path }} does not exist on {{ target_host }}"
+      when: not file_stat.stat.exists
+      
+    - name: Process file deletion
+      block:
+        - name: Display file information before deletion
+          debug:
+            msg:
+              - "Preparing to delete file on {{ target_host }}"
+              - "Path: {{ file_path }}"
+              - "Size: {{ file_stat.stat.size }} bytes"
+              - "Owner: {{ file_stat.stat.pw_name }}"
+              - "Last modified: {{ file_stat.stat.mtime }}"
+          when: verify_before_delete
+          
+        - name: Create backup directory if needed
+          file:
+            path: "{{ backup_dir }}"
+            state: directory
+            mode: '0755'
+          when: create_backup
+          
+        - name: Backup file before deletion
+          copy:
+            src: "{{ file_path }}"
+            dest: "{{ backup_dir }}/{{ file_path | basename }}.{{ ansible_date_time.epoch }}.bak"
+            remote_src: yes
+            mode: preserve
+          when: create_backup
+          register: backup_result
+          
+        - name: Display backup location
+          debug:
+            msg: "Backup created at {{ backup_result.dest }}"
+          when: 
+            - create_backup
+            - backup_result is changed
+            
+        - name: Delete the file
+          file:
+            path: "{{ file_path }}"
+            state: absent
+          register: delete_result
+          
+        - name: Verify file deletion
+          stat:
+            path: "{{ file_path }}"
+          register: verify_deletion
+          
+        - name: Confirm deletion
+          debug:
+            msg: "File {{ file_path }} has been successfully deleted from {{ target_host }}"
+          when: not verify_deletion.stat.exists
+          
+        - name: Warn if deletion failed
+          debug:
+            msg: "WARNING: File {{ file_path }} still exists on {{ target_host }}"
+          when: verify_deletion.stat.exists
+          
+      when: file_stat.stat.exists

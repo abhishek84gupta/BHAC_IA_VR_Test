@@ -1,0 +1,129 @@
+---
+# Playbook: Kill Process
+# Purpose: Kill a process by name or PID and return a summary
+
+# Play 1: Add target host to runtime inventory
+- name: Initialize target host
+  hosts: localhost
+  gather_facts: no
+  connection: local
+
+  tasks:
+    - name: Validate target_host is provided
+      fail:
+        msg: "target_host is required"
+      when: target_host is not defined or target_host == ""
+
+    - name: Add target host to runtime inventory
+      add_host:
+        name: "{{ target_host }}"
+        groups: target_servers
+        ansible_host: "{{ target_host }}"
+        ansible_user: "{{ ansible_user | default(omit) }}"
+        ansible_password: "{{ ansible_password | default(omit) }}"
+        ansible_port: "{{ ansible_port | default(22) }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+        ansible_connection: "{{ 'local' if target_host in ['localhost', '127.0.0.1'] else 'ssh' }}"
+
+# Play 2: Kill process
+- name: Kill process on remote host
+  hosts: target_servers
+  gather_facts: yes
+  become: yes
+
+  tasks:
+    - name: Validate input
+      fail:
+        msg: "Either process_name or process_pid must be provided"
+      when:
+        - process_name is not defined
+        - process_pid is not defined
+        - process_id is not defined
+
+    - name: Resolve PID from process_id
+      set_fact:
+        process_pid: "{{ process_id }}"
+      when:
+        - process_id is defined
+        - process_id | string | length > 0
+
+    - name: Find PID by process name
+      shell: "pgrep -f '{{ process_name }}'"
+      register: process_lookup
+      changed_when: false
+      failed_when: false
+      when:
+        - process_name is defined
+        - process_name | length > 0
+
+    - name: Use first matching PID
+      set_fact:
+        process_pid: "{{ process_lookup.stdout_lines[0] }}"
+      when:
+        - process_name is defined
+        - process_lookup.stdout_lines | length > 0
+
+    - name: No matching process found
+      set_stats:
+        data:
+          result: |
+            PROCESS TERMINATION SUMMARY
+
+            Host: {{ inventory_hostname }}
+            Process Name: {{ process_name | default('N/A') }}
+
+            No matching process was found.
+
+            Status: NO_PROCESS_FOUND
+        aggregate: no
+        per_host: no
+      when:
+        - process_name is defined
+        - process_pid is not defined
+
+    - meta: end_host
+      when:
+        - process_name is defined
+        - process_pid is not defined
+
+    - name: Kill process
+      shell: "kill -15 {{ process_pid }}"
+      register: kill_result
+      failed_when: false
+
+    - name: Wait briefly
+      pause:
+        seconds: 2
+
+    - name: Verify process termination
+      shell: |
+        ps -p {{ process_pid }} > /dev/null 2>&1 && echo running || echo terminated
+      register: verify_result
+      changed_when: false
+
+    - name: Force kill if still running
+      shell: "kill -9 {{ process_pid }}"
+      when: verify_result.stdout == "running"
+      failed_when: false
+
+    - name: Final verification
+      shell: |
+        ps -p {{ process_pid }} > /dev/null 2>&1 && echo running || echo terminated
+      register: final_verify
+      changed_when: false
+
+    - name: Export result
+      set_stats:
+        data:
+          result: |
+            PROCESS TERMINATION SUMMARY
+
+            Host: {{ inventory_hostname }}
+            Process Name: {{ process_name | default('N/A') }}
+            Process PID: {{ process_pid }}
+
+            Final State: {{ final_verify.stdout }}
+
+            Status: {{ 'SUCCESS' if final_verify.stdout == 'terminated' else 'FAILURE' }}
+        aggregate: no
+        per_host: no

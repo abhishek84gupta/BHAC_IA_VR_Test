@@ -1,0 +1,131 @@
+---
+- name: Get mailbox size and compare with quota
+  hosts: localhost
+  gather_facts: no
+
+  vars:
+    # Configuration: Override mailbox_email via extra_vars
+    # 
+    # CLI Example:
+    #   ansible-playbook "Get Mailbox Size and Compare Quota.yml" \
+    #     -e "mailbox_email=user@example.com"
+    # 
+    # AWX/Tower Example:
+    #   Extra Variables: {"mailbox_email": "user@example.com"}
+    # 
+    smtp4dev_url: "http://clm-pun-su0nat.bmc.com:3000"
+    quota_server_url: "http://clm-pun-su0nat.bmc.com:3001"
+    default_mailbox_email: "to@test.com"
+
+  tasks:
+    - name: Set mailbox configuration (use extra_vars or default)
+      set_fact:
+        mailbox_email: "{{ mailbox_email | default(default_mailbox_email) }}"
+
+    - name: Display configuration
+      debug:
+        msg:
+          - "📧 Checking mailbox: {{ mailbox_email }}"
+          - "📨 SMTP4Dev URL: {{ smtp4dev_url }}"
+          - "📊 Quota Server URL: {{ quota_server_url }}"
+
+    # Get actual mailbox size from smtp4dev
+    - name: Fetch message list from smtp4dev
+      uri:
+        url: "{{ smtp4dev_url }}/api/messages?page=1&pageSize=1000"
+        method: GET
+        return_content: yes
+      register: message_list
+
+    - name: Fetch message details from smtp4dev
+      uri:
+        url: "{{ smtp4dev_url }}/api/messages/{{ item.id }}"
+        method: GET
+        return_content: yes
+      loop: "{{ message_list.json.results }}"
+      register: message_details
+
+    - name: Calculate actual mailbox size (bytes)
+      set_fact:
+        actual_mailbox_size_bytes: >-
+          {{
+            message_details.results
+            | map(attribute='json.parts')
+            | flatten
+            | map(attribute='size')
+            | sum
+          }}
+
+    - name: Convert mailbox size to MB
+      set_fact:
+        actual_mailbox_size_mb: "{{ (actual_mailbox_size_bytes | float / 1024 / 1024) | round(2) }}"
+
+    # Get quota information from quota server
+    - name: Get mailbox quota from quota server
+      uri:
+        url: "{{ quota_server_url }}/api/mailbox/{{ mailbox_email }}/quota"
+        method: GET
+        return_content: yes
+      register: quota_info
+
+    # Update usage in quota server
+    - name: Update mailbox usage in quota server
+      uri:
+        url: "{{ quota_server_url }}/api/mailbox/{{ mailbox_email }}/usage"
+        method: PUT
+        body_format: json
+        body:
+          quotaUsed: "{{ actual_mailbox_size_bytes }}"
+        return_content: yes
+      register: usage_update
+
+    # Set stats for AWX/Tower job template caller
+    - name: Set quota statistics for job template caller
+      set_stats:
+        data:
+          mailbox_email: "{{ mailbox_email }}"
+          message_count: "{{ message_list.json.rowCount }}"
+          mailbox_size_bytes: "{{ actual_mailbox_size_bytes }}"
+          mailbox_size_mb: "{{ actual_mailbox_size_mb }}"
+          quota_allocated_bytes: "{{ usage_update.json.quota.allocated }}"
+          quota_allocated_mb: "{{ usage_update.json.quota.allocatedFormatted.value }}"
+          quota_used_bytes: "{{ usage_update.json.newUsage.bytes }}"
+          quota_used_mb: "{{ usage_update.json.newUsage.formatted.value }}"
+          quota_remaining_bytes: "{{ usage_update.json.quota.remaining }}"
+          quota_remaining_mb: "{{ usage_update.json.quota.remainingFormatted.value }}"
+          quota_percentage_used: "{{ usage_update.json.quota.percentageUsed }}"
+          is_over_quota: "{{ usage_update.json.quota.isOverQuota }}"
+          status: "{{ 'OVER_QUOTA' if usage_update.json.quota.isOverQuota else 'WITHIN_LIMITS' }}"
+        aggregate: no
+        per_host: no
+
+    # Display comprehensive report
+    - name: Display mailbox and quota report
+      debug:
+        msg:
+          - "=================================="
+          - "     MAILBOX USAGE REPORT"
+          - "=================================="
+          - ""
+          - "Mailbox: {{ mailbox_email }}"
+          - "Message Count: {{ message_list.json.rowCount }}"
+          - ""
+          - "--- Actual Usage (from smtp4dev) ---"
+          - "Size: {{ actual_mailbox_size_mb }} MB ({{ actual_mailbox_size_bytes }} bytes)"
+          - ""
+          - "--- Quota Information ---"
+          - "Allocated: {{ usage_update.json.quota.allocatedFormatted.value }} {{ usage_update.json.quota.allocatedFormatted.unit }}"
+          - "Used: {{ usage_update.json.quota.percentageUsed }}%"
+          - "Remaining: {{ usage_update.json.quota.remainingFormatted.value }} {{ usage_update.json.quota.remainingFormatted.unit }}"
+          - ""
+          - "Status: {{ 'OVER QUOTA ⚠️' if usage_update.json.quota.isOverQuota else 'Within Limits ✓' }}"
+          - "{{ usage_update.json.warning if usage_update.json.warning else '' }}"
+          - "=================================="
+          - ""
+          - "📊 Stats have been set and can be retrieved by the job template caller"
+
+    - name: Alert if over quota
+      fail:
+        msg: "⚠️  WARNING: Mailbox {{ mailbox_email }} is OVER QUOTA! Used {{ usage_update.json.quota.percentageUsed }}% of allocated space."
+      when: usage_update.json.quota.isOverQuota
+      ignore_errors: yes

@@ -1,0 +1,37 @@
+---
+# Playbook 2: Restart ApiGateWayApplication (Simulation)
+# Purpose: Connect to host, run ls, and report ApiGateWayApplication restarted successfully
+# Usage: ansible-playbook playbooks/02-restart-service.yml
+#
+# Note: Always targets bcx-pun-fc649a5.bmc.com. No inventory or extra_vars.
+#       Credentials via job template.
+
+- name: Add target host
+  hosts: localhost
+  gather_facts: no
+  connection: local
+
+  tasks:
+    - name: Add bcx-pun-fc649a5 to runtime inventory
+      add_host:
+        name: bcx-pun-fc649a5.bmc.com
+        groups: target_host
+        ansible_host: bcx-pun-fc649a5.bmc.com
+        ansible_user: "{{ ansible_user | default(omit) }}"
+        ansible_password: "{{ ansible_password | default(omit) }}"
+        ansible_port: "{{ ansible_port | default(22) }}"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+
+- name: Run ls and report restart success
+  hosts: target_host
+  gather_facts: no
+
+  tasks:
+    - name: Run ls command
+      command: ls
+      register: ls_output
+      changed_when: false
+
+    - name: Display restart success message
+      debug:
+        msg: "ApiGateWayApplication restarted successfully."

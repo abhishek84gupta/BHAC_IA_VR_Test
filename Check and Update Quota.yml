@@ -1,0 +1,105 @@
+---
+- name: Check mailbox quota and update if needed
+  hosts: localhost
+  gather_facts: no
+
+  vars:
+    # Configuration: Override these via extra_vars
+    # 
+    # CLI Example:
+    #   ansible-playbook "Check and Update Quota.yml" \
+    #     -e "mailbox_email=user@example.com" \
+    #     -e "desired_quota_mb=10"
+    # 
+    # AWX/Tower Example:
+    #   Extra Variables: {"mailbox_email": "user@example.com", "desired_quota_mb": 10}
+    # 
+    quota_server_url: "http://clm-pun-su0nat.bmc.com:3001"
+    default_mailbox_email: "to@test.com"
+    default_desired_quota_mb: 5
+
+  tasks:
+    - name: Set mailbox configuration (use extra_vars or defaults)
+      set_fact:
+        mailbox_email: "{{ mailbox_email | default(default_mailbox_email) }}"
+        desired_quota_mb: "{{ desired_quota_mb | default(default_desired_quota_mb) | int }}"
+
+    - name: Display configuration
+      debug:
+        msg:
+          - "📧 Mailbox: {{ mailbox_email }}"
+          - "🎯 Desired Quota: {{ desired_quota_mb }} MB"
+          - "📊 Quota Server: {{ quota_server_url }}"
+
+    - name: Get current mailbox quota
+      uri:
+        url: "{{ quota_server_url }}/api/mailbox/{{ mailbox_email }}/quota"
+        method: GET
+        return_content: yes
+      register: current_quota
+
+    - name: Display current quota information
+      debug:
+        msg:
+          - "=== Current Quota Information ==="
+          - "Email: {{ current_quota.json.email }}"
+          - "Allocated: {{ current_quota.json.quota.allocatedFormatted.value }} {{ current_quota.json.quota.allocatedFormatted.unit }}"
+          - "Used: {{ current_quota.json.quota.usedFormatted.value }} {{ current_quota.json.quota.usedFormatted.unit }}"
+          - "Remaining: {{ current_quota.json.quota.remainingFormatted.value }} {{ current_quota.json.quota.remainingFormatted.unit }}"
+          - "Percentage Used: {{ current_quota.json.quota.percentageUsed }}%"
+          - "Over Quota: {{ current_quota.json.quota.isOverQuota }}"
+
+    - name: Check if quota needs update
+      set_fact:
+        needs_update: "{{ (current_quota.json.quota.allocated / 1024 / 1024) != desired_quota_mb }}"
+
+    - name: Update quota allocation
+      uri:
+        url: "{{ quota_server_url }}/api/mailbox/{{ mailbox_email }}/quota"
+        method: PUT
+        body_format: json
+        body:
+          quotaAllocatedMB: "{{ desired_quota_mb }}"
+        return_content: yes
+      register: quota_update
+      when: needs_update
+
+    - name: Display quota update result
+      debug:
+        msg:
+          - "=== Quota Updated ==="
+          - "Old Quota: {{ quota_update.json.oldQuota.formatted.value }} {{ quota_update.json.oldQuota.formatted.unit }}"
+          - "New Quota: {{ quota_update.json.newQuota.formatted.value }} {{ quota_update.json.newQuota.formatted.unit }}"
+          - "Current Usage: {{ quota_update.json.currentUsage.formatted.value }} {{ quota_update.json.currentUsage.formatted.unit }}"
+          - "Percentage Used: {{ quota_update.json.currentUsage.percentageUsed }}%"
+      when: needs_update
+
+    - name: Quota already correct
+      debug:
+        msg: "Quota is already set to {{ desired_quota_mb }} MB. No update needed."
+      when: not needs_update
+
+    - name: Get final quota state
+      uri:
+        url: "{{ quota_server_url }}/api/mailbox/{{ mailbox_email }}/quota"
+        method: GET
+        return_content: yes
+      register: final_quota
+
+    - name: Set quota statistics for job template caller
+      set_stats:
+        data:
+          mailbox_email: "{{ mailbox_email }}"
+          quota_allocated_bytes: "{{ final_quota.json.quota.allocated }}"
+          quota_allocated_mb: "{{ final_quota.json.quota.allocatedFormatted.value }}"
+          quota_used_bytes: "{{ final_quota.json.quota.used }}"
+          quota_used_mb: "{{ final_quota.json.quota.usedFormatted.value }}"
+          quota_remaining_bytes: "{{ final_quota.json.quota.remaining }}"
+          quota_remaining_mb: "{{ final_quota.json.quota.remainingFormatted.value }}"
+          quota_percentage_used: "{{ final_quota.json.quota.percentageUsed }}"
+          is_over_quota: "{{ final_quota.json.quota.isOverQuota }}"
+          quota_was_updated: "{{ needs_update }}"
+          desired_quota_mb: "{{ desired_quota_mb }}"
+          status: "{{ 'OVER_QUOTA' if final_quota.json.quota.isOverQuota else 'WITHIN_LIMITS' }}"
+        aggregate: no
+        per_host: no

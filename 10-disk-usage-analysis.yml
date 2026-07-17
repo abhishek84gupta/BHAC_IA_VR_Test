@@ -1,0 +1,326 @@
+---
+# Playbook 10: Directory-wise Storage Usage
+# Purpose: Analyze and report disk usage by directory
+# 
+# CLI Examples:
+#   ansible-playbook playbooks/10-disk-usage-analysis.yml -e "target_host=server.example.com" -k
+#   ansible-playbook playbooks/10-disk-usage-analysis.yml -e "target_host=192.168.1.100 target_path=/var threshold_gb=5 ansible_user=admin" -k
+# 
+# AWX/Tower Example:
+#   Credentials: Machine credential with SSH username and password
+#   Extra Variables: {"target_host": "server.example.com", "target_path": "/", "threshold_gb": 1}
+#
+# Note: Does not use inventory. Host is passed via extra_vars.
+#       Username and password are provided via job template credentials.
+#
+
+# Play 1: Add target host to runtime inventory
+- name: Initialize target host
+  hosts: localhost
+  gather_facts: no
+  connection: local
+
+  vars:
+    default_target_host: "bcx-pun-fc649a5.bmc.com"
+
+  tasks:
+    - name: Set target host (use extra_vars or default)
+      set_fact:
+        resolved_host: "{{ target_host | default(default_target_host) }}"
+
+    - name: Add target host to runtime inventory
+      add_host:
+        name: "{{ resolved_host }}"
+        groups: target_servers
+        ansible_host: "{{ resolved_host }}"
+        ansible_user: "{{ ansible_user | default(omit) }}"
+        ansible_password: "{{ ansible_password | default(omit) }}"
+        ansible_port: "{{ ansible_port | default(22) }}"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+        ansible_connection: "{{ 'local' if resolved_host in ['localhost', '127.0.0.1'] else 'ssh' }}"
+
+# Play 2: Analyze disk usage on target host
+- name: Analyze directory-wise storage usage
+  hosts: target_servers
+  become: yes
+  
+  vars:
+    default_target_path: "/"
+    default_depth: 2
+    default_threshold_gb: 1
+    default_top_directories: 20
+    default_generate_report: yes
+    report_dir: "./storage_reports"
+    
+  tasks:
+    - name: Set disk analysis configuration (use extra_vars or defaults)
+      set_fact:
+        target_path: "{{ target_path | default(default_target_path) }}"
+        depth: "{{ depth | default(default_depth) | int }}"
+        threshold_gb: "{{ threshold_gb | default(default_threshold_gb) | int }}"
+        top_directories: "{{ top_directories | default(default_top_directories) | int }}"
+        generate_report: "{{ generate_report | default(default_generate_report) | bool }}"
+
+    - name: Display configuration
+      debug:
+        msg:
+          - "🎯 Target Host: {{ inventory_hostname }}"
+          - "📁 Target Path: {{ target_path }}"
+          - "📊 Analysis Depth: {{ depth }}"
+          - "📏 Threshold: {{ threshold_gb }} GB"
+          - "🔝 Top Directories: {{ top_directories }}"
+          - "📝 Generate Report: {{ generate_report }}"
+    - name: Create local report directory
+      file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      become: no
+      when: generate_report
+      
+    - name: Get overall disk usage
+      shell: df -h
+      register: disk_usage_overall
+      changed_when: false
+
+    - name: Get disk usage in machine-readable format (for stats)
+      shell: |
+        df -BG --output=target,size,used,avail,pcent | tail -n +2 | head -5 | \
+        awk '{gsub(/%/,"",$5); printf "{\"mount\":\"%s\",\"size_gb\":\"%s\",\"used_gb\":\"%s\",\"avail_gb\":\"%s\",\"use_percent\":\"%s\"}\n", $1, $2, $3, $4, $5}'
+      register: disk_usage_json
+      changed_when: false
+
+    - name: Parse disk usage stats
+      set_fact:
+        disk_stats: "{{ disk_usage_json.stdout_lines | map('from_json') | list }}"
+
+    - name: Get root filesystem usage specifically
+      shell: |
+        df -BG / | tail -1 | awk '{gsub(/G/,"",$2); gsub(/G/,"",$3); gsub(/G/,"",$4); gsub(/%/,"",$5); print $2","$3","$4","$5}'
+      register: root_fs_usage
+      changed_when: false
+
+    - name: Parse root filesystem stats
+      set_fact:
+        root_total_gb: "{{ root_fs_usage.stdout.split(',')[0] }}"
+        root_used_gb: "{{ root_fs_usage.stdout.split(',')[1] }}"
+        root_avail_gb: "{{ root_fs_usage.stdout.split(',')[2] }}"
+        root_use_percent: "{{ root_fs_usage.stdout.split(',')[3] }}"
+      
+    - name: Display overall disk usage
+      debug:
+        msg: "{{ disk_usage_overall.stdout_lines }}"
+        
+    - name: Get directory sizes (top level)
+      shell: |
+        du -h --max-depth={{ depth }} {{ target_path }} 2>/dev/null | \
+        sort -rh | head -n {{ top_directories }}
+      register: directory_sizes
+      changed_when: false
+      
+    - name: Display top directories by size
+      debug:
+        msg: 
+          - "Top {{ top_directories }} directories by size on {{ inventory_hostname }}:"
+          - "{{ directory_sizes.stdout_lines }}"
+          
+    - name: Find large directories (over threshold)
+      shell: |
+        du -BG --max-depth={{ depth }} {{ target_path }} 2>/dev/null | \
+        awk '$1 >= {{ threshold_gb }} {print $1"G\t"$2}' | sort -rn
+      register: large_directories
+      changed_when: false
+      
+    - name: Display large directories
+      debug:
+        msg:
+          - "Directories over {{ threshold_gb }}GB on {{ inventory_hostname }}:"
+          - "{{ large_directories.stdout_lines }}"
+      when: large_directories.stdout_lines | length > 0
+      
+    - name: Get inode usage
+      shell: df -i
+      register: inode_usage
+      changed_when: false
+      
+    - name: Check for directories with many files
+      shell: |
+        find {{ target_path }} -maxdepth {{ depth }} -type d -exec sh -c \
+        'echo "$(find "$1" -maxdepth 1 -type f | wc -l) $1"' _ {} \; 2>/dev/null | \
+        sort -rn | head -n 10
+      register: file_counts
+      changed_when: false
+      ignore_errors: yes
+      
+    - name: Find largest files
+      shell: |
+        find {{ target_path }} -type f -exec du -h {} + 2>/dev/null | \
+        sort -rh | head -n 20
+      register: largest_files
+      changed_when: false
+      async: 300
+      poll: 5
+      
+    - name: Check for old log files
+      shell: |
+        find /var/log -type f -name "*.log" -mtime +30 -exec du -h {} + 2>/dev/null | \
+        sort -rh | head -n 10
+      register: old_logs
+      changed_when: false
+      ignore_errors: yes
+      
+    - name: Identify temporary file usage
+      shell: |
+        du -sh /tmp /var/tmp 2>/dev/null
+      register: tmp_usage
+      changed_when: false
+      ignore_errors: yes
+      
+    - name: Generate comprehensive storage report
+      shell: |
+        cat > /tmp/storage_report_{{ inventory_hostname }}.txt << 'EOF'
+        ================================================================
+        STORAGE ANALYSIS REPORT
+        ================================================================
+        Server: {{ inventory_hostname }}
+        Generated: {{ ansible_date_time.iso8601 }}
+        
+        ================================================================
+        OVERALL DISK USAGE
+        ================================================================
+        {{ disk_usage_overall.stdout }}
+        
+        ================================================================
+        INODE USAGE
+        ================================================================
+        {{ inode_usage.stdout }}
+        
+        ================================================================
+        TOP {{ top_directories }} DIRECTORIES BY SIZE
+        ================================================================
+        {{ directory_sizes.stdout }}
+        
+        ================================================================
+        DIRECTORIES OVER {{ threshold_gb }}GB
+        ================================================================
+        {{ large_directories.stdout }}
+        
+        ================================================================
+        TOP 20 LARGEST FILES
+        ================================================================
+        {{ largest_files.stdout }}
+        
+        ================================================================
+        DIRECTORIES WITH MOST FILES
+        ================================================================
+        {{ file_counts.stdout }}
+        
+        ================================================================
+        OLD LOG FILES (>30 days)
+        ================================================================
+        {{ old_logs.stdout }}
+        
+        ================================================================
+        TEMPORARY DIRECTORY USAGE
+        ================================================================
+        {{ tmp_usage.stdout }}
+        
+        ================================================================
+        EOF
+      args:
+        executable: /bin/bash
+      when: generate_report
+      
+    - name: Fetch storage report
+      fetch:
+        src: "/tmp/storage_report_{{ inventory_hostname }}.txt"
+        dest: "{{ report_dir }}/storage_report_{{ inventory_hostname }}_{{ ansible_date_time.epoch }}.txt"
+        flat: yes
+      when: generate_report
+      
+    - name: Cleanup remote report file
+      file:
+        path: "/tmp/storage_report_{{ inventory_hostname }}.txt"
+        state: absent
+      when: generate_report
+      
+    - name: Display report location
+      debug:
+        msg: "Storage report saved to {{ report_dir }}/storage_report_{{ inventory_hostname }}_{{ ansible_date_time.epoch }}.txt"
+      when: generate_report
+      
+    - name: Check for potential cleanup opportunities
+      debug:
+        msg:
+          - "=== CLEANUP RECOMMENDATIONS ==="
+          - "1. Check old log files in /var/log"
+          - "2. Review temporary directories: {{ tmp_usage.stdout_lines | default([]) }}"
+          - "3. Consider archiving large directories identified above"
+          - "4. Review package cache (yum clean all / apt-get clean)"
+
+    - name: Count large directories
+      set_fact:
+        large_dir_count: "{{ large_directories.stdout_lines | length }}"
+
+    - name: Count old log files
+      set_fact:
+        old_log_count: "{{ old_logs.stdout_lines | default([]) | length }}"
+
+    - name: Determine disk health status
+      set_fact:
+        disk_health_status: >-
+          {% if root_use_percent | int >= 90 %}CRITICAL
+          {% elif root_use_percent | int >= 80 %}WARNING
+          {% elif root_use_percent | int >= 70 %}ATTENTION
+          {% else %}HEALTHY{% endif %}
+
+    - name: Set disk usage statistics for job template caller
+      set_stats:
+        data:
+          target_host: "{{ inventory_hostname }}"
+          target_path: "{{ target_path }}"
+          analysis_depth: "{{ depth }}"
+          threshold_gb: "{{ threshold_gb }}"
+          root_total_gb: "{{ root_total_gb }}"
+          root_used_gb: "{{ root_used_gb }}"
+          root_avail_gb: "{{ root_avail_gb }}"
+          root_use_percent: "{{ root_use_percent }}"
+          disk_health_status: "{{ disk_health_status | trim }}"
+          disk_filesystems: "{{ disk_stats | to_json }}"
+          top_directories_count: "{{ directory_sizes.stdout_lines | length }}"
+          top_directories_list: "{{ directory_sizes.stdout_lines[:10] | to_json }}"
+          large_directories_count: "{{ large_dir_count }}"
+          large_directories_list: "{{ large_directories.stdout_lines[:10] | to_json if large_directories.stdout_lines | length > 0 else '[]' }}"
+          largest_files_list: "{{ largest_files.stdout_lines[:10] | to_json if largest_files.stdout_lines is defined else '[]' }}"
+          old_log_files_count: "{{ old_log_count }}"
+          tmp_usage: "{{ tmp_usage.stdout | default('N/A') }}"
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          os_family: "{{ ansible_os_family | default('unknown') }}"
+          report_generated: "{{ generate_report }}"
+          status: "SUCCESS"
+        aggregate: no
+        per_host: yes
+
+    - name: Final summary
+      debug:
+        msg:
+          - "=================================="
+          - "   DISK USAGE ANALYSIS SUMMARY"
+          - "=================================="
+          - "Host: {{ inventory_hostname }}"
+          - "OS: {{ ansible_os_family | default('unknown') }}"
+          - ""
+          - "--- Root Filesystem (/) ---"
+          - "Total: {{ root_total_gb }} GB"
+          - "Used: {{ root_used_gb }} GB ({{ root_use_percent }}%)"
+          - "Available: {{ root_avail_gb }} GB"
+          - "Health Status: {{ disk_health_status | trim }}"
+          - ""
+          - "--- Analysis Results ---"
+          - "Large Directories (>{{ threshold_gb }}GB): {{ large_dir_count }}"
+          - "Old Log Files (>30 days): {{ old_log_count }}"
+          - ""
+          - "Status: {{ '🔴 CRITICAL' if disk_health_status | trim == 'CRITICAL' else '🟡 WARNING' if disk_health_status | trim == 'WARNING' else '🟠 ATTENTION' if disk_health_status | trim == 'ATTENTION' else '🟢 HEALTHY' }}"
+          - "=================================="
+          - "📊 Stats have been set and can be retrieved by the job template caller"

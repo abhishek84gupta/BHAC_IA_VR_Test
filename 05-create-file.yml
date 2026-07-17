@@ -1,0 +1,93 @@
+---
+# Playbook 5: Create a New File
+# Purpose: Create a new file with specific content and permissions
+# Usage: ansible-playbook playbooks/05-create-file.yml -e "Hostname=<target_host> file_path=/path/to/new/file"
+# Job Template Variables: Hostname, file_path
+
+- name: Create new file on remote servers
+  hosts: "{{ target_host }}"
+  become: yes
+  
+  vars:
+    # target_host and file_path are expected from job template extra vars
+    # target_host: Required - target host to create file on
+    # file_path: Required - path where the file should be created
+    file_content: |
+      This is a file created by Ansible
+      Created on: {{ ansible_date_time.iso8601 }}
+      Hostname: {{ target_host }}
+    file_owner: "root"
+    file_group: "root"
+    file_mode: "0644"
+    force_overwrite: no  # Set to yes to overwrite existing files
+    
+  tasks:
+    - name: Validate required variable - target_host
+      fail:
+        msg: "ERROR: 'target_host' variable is required but not provided. Please pass it via job template extra vars."
+      when: target_host is not defined or target_host == ''
+      delegate_to: localhost
+      run_once: true
+      
+    - name: Validate required variable - file_path
+      fail:
+        msg: "ERROR: 'file_path' variable is required but not provided. Please pass it via job template extra vars."
+      when: file_path is not defined or file_path == ''
+      delegate_to: localhost
+      run_once: true
+    - name: Ensure parent directory exists
+      file:
+        path: "{{ file_path | dirname }}"
+        state: directory
+        mode: '0755'
+        
+    - name: Check if file already exists
+      stat:
+        path: "{{ file_path }}"
+      register: file_check
+      
+    - name: Display warning if file exists
+      debug:
+        msg: "WARNING: File {{ file_path }} already exists on {{ target_host }}"
+      when: file_check.stat.exists and not force_overwrite
+      
+    - name: Create file with content
+      copy:
+        content: "{{ file_content }}"
+        dest: "{{ file_path }}"
+        owner: "{{ file_owner }}"
+        group: "{{ file_group }}"
+        mode: "{{ file_mode }}"
+        force: "{{ force_overwrite }}"
+      register: create_result
+      when: not file_check.stat.exists or force_overwrite
+      
+    - name: Alternative - Create empty file (touch)
+      file:
+        path: "{{ file_path }}"
+        state: touch
+        owner: "{{ file_owner }}"
+        group: "{{ file_group }}"
+        mode: "{{ file_mode }}"
+      when: false  # Set to true if you want to create empty file instead
+      
+    - name: Verify file creation
+      stat:
+        path: "{{ file_path }}"
+      register: created_file
+      when: create_result is changed
+      
+    - name: Display creation results
+      debug:
+        msg:
+          - "File created successfully on {{ target_host }}"
+          - "Path: {{ file_path }}"
+          - "Size: {{ created_file.stat.size | default(0) }} bytes"
+          - "Owner: {{ created_file.stat.pw_name | default('N/A') }}"
+          - "Permissions: {{ created_file.stat.mode | default('N/A') }}"
+      when: create_result is changed
+      
+    - name: File already exists message
+      debug:
+        msg: "File {{ file_path }} already exists on {{ target_host }}, skipping creation"
+      when: file_check.stat.exists and not force_overwrite

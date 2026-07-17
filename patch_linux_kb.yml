@@ -1,0 +1,109 @@
+---
+# Ansible Playbook: Deploy a KB patch package on Linux servers
+# Usage: ansible-playbook patch_linux_kb.yml -i "localhost," -e "target_host=192.168.1.100 kb_id=KB2024-001 ansible_user=admin"
+
+- name: Add target host dynamically
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Add target host to in-memory inventory
+      add_host:
+        name: "{{ target_host }}"
+        groups: patch_targets
+        ansible_user: "{{ ansible_user | default('root') }}"
+        ansible_ssh_private_key_file: "{{ ssh_key | default(omit) }}"
+        ansible_ssh_pass: "{{ ssh_pass | default(omit) }}"
+
+- name: Deploy KB patch package on Linux server
+  hosts: patch_targets
+  become: true
+  gather_facts: true
+
+  vars:
+    kb_id: "KB2024-001"
+    patch_log_dir: "/var/log/patching"
+    reboot_after_patch: false
+    max_reboot_wait: 300
+
+  tasks:
+
+    - name: Create patching log directory
+      file:
+        path: "{{ patch_log_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Record pre-patch system state
+      shell: |
+        echo "=== Pre-Patch Report ===" > {{ patch_log_dir }}/{{ kb_id }}_pre_patch.log
+        echo "Date: $(date)" >> {{ patch_log_dir }}/{{ kb_id }}_pre_patch.log
+        echo "Hostname: $(hostname)" >> {{ patch_log_dir }}/{{ kb_id }}_pre_patch.log
+        echo "Kernel: $(uname -r)" >> {{ patch_log_dir }}/{{ kb_id }}_pre_patch.log
+        echo "Uptime: $(uptime)" >> {{ patch_log_dir }}/{{ kb_id }}_pre_patch.log
+      register: pre_patch_state
+
+    # --- RHEL / CentOS / Oracle Linux ---
+    - name: Install KB patch via yum (RHEL/CentOS)
+      yum:
+        name: "{{ kb_id }}"
+        state: present
+        update_cache: true
+      when: ansible_os_family == "RedHat"
+      register: yum_result
+
+    # --- Ubuntu / Debian ---
+    - name: Update apt cache (Ubuntu/Debian)
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+    - name: Install KB patch via apt (Ubuntu/Debian)
+      apt:
+        name: "{{ kb_id }}"
+        state: present
+      when: ansible_os_family == "Debian"
+      register: apt_result
+
+    # --- SUSE ---
+    - name: Install KB patch via zypper (SUSE)
+      zypper:
+        name: "{{ kb_id }}"
+        state: present
+        update_cache: true
+      when: ansible_os_family == "Suse"
+      register: zypper_result
+
+    - name: Record post-patch system state
+      shell: |
+        echo "=== Post-Patch Report ===" > {{ patch_log_dir }}/{{ kb_id }}_post_patch.log
+        echo "Date: $(date)" >> {{ patch_log_dir }}/{{ kb_id }}_post_patch.log
+        echo "Hostname: $(hostname)" >> {{ patch_log_dir }}/{{ kb_id }}_post_patch.log
+        echo "Kernel: $(uname -r)" >> {{ patch_log_dir }}/{{ kb_id }}_post_patch.log
+        echo "Patch {{ kb_id }} applied successfully" >> {{ patch_log_dir }}/{{ kb_id }}_post_patch.log
+
+    - name: Verify patch installation (RHEL/CentOS)
+      shell: "rpm -q {{ kb_id }}"
+      register: verify_rpm
+      when: ansible_os_family == "RedHat"
+      changed_when: false
+      failed_when: verify_rpm.rc != 0
+
+    - name: Verify patch installation (Ubuntu/Debian)
+      shell: "dpkg -l | grep {{ kb_id }}"
+      register: verify_dpkg
+      when: ansible_os_family == "Debian"
+      changed_when: false
+      failed_when: verify_dpkg.rc != 0
+
+    - name: Display patch result
+      debug:
+        msg: "Patch {{ kb_id }} installed successfully on {{ inventory_hostname }}"
+
+    - name: Reboot server if required
+      reboot:
+        reboot_timeout: "{{ max_reboot_wait }}"
+        msg: "Rebooting for patch {{ kb_id }}"
+      when: reboot_after_patch | bool

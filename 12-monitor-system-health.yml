@@ -1,0 +1,162 @@
+---
+# Additional Playbook: System Health Monitoring
+# Purpose: Monitor system health metrics and generate alerts
+# Usage: ansible-playbook playbooks/12-monitor-system-health.yml
+
+- name: Monitor system health on remote servers
+  hosts: all
+  become: yes
+  
+  vars:
+    cpu_threshold: 80          # CPU usage percentage threshold
+    memory_threshold: 85       # Memory usage percentage threshold
+    disk_threshold: 90         # Disk usage percentage threshold
+    load_threshold: 4.0        # Load average threshold
+    generate_alert: yes        # Generate alert file for critical issues
+    
+  tasks:
+    - name: Gather system facts
+      setup:
+        gather_subset:
+          - hardware
+          - network
+          - virtual
+          
+    - name: Get CPU usage
+      shell: top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1
+      register: cpu_usage
+      changed_when: false
+      
+    - name: Get memory usage
+      shell: free | grep Mem | awk '{printf "%.0f", ($3/$2) * 100.0}'
+      register: memory_usage
+      changed_when: false
+      
+    - name: Get disk usage for root partition
+      shell: df -h / | tail -1 | awk '{print $5}' | cut -d'%' -f1
+      register: disk_usage
+      changed_when: false
+      
+    - name: Get load average
+      shell: uptime | awk -F'load average:' '{print $2}' | awk -F, '{print $1}' | tr -d ' '
+      register: load_average
+      changed_when: false
+      
+    - name: Get running processes count
+      shell: ps aux | wc -l
+      register: process_count
+      changed_when: false
+      
+    - name: Get zombie processes
+      shell: ps aux | awk '{if ($8 == "Z") print $0}' | wc -l
+      register: zombie_count
+      changed_when: false
+      
+    - name: Check for failed systemd services
+      shell: systemctl --failed --no-pager --no-legend | wc -l
+      register: failed_services_count
+      changed_when: false
+      
+    - name: List failed services
+      shell: systemctl --failed --no-pager --no-legend
+      register: failed_services
+      changed_when: false
+      when: failed_services_count.stdout | int > 0
+      
+    - name: Check disk I/O wait
+      shell: iostat -x 1 2 | tail -n +4 | awk '{sum+=$4} END {print sum/NR}'
+      register: io_wait
+      changed_when: false
+      ignore_errors: yes
+      
+    - name: Get network connection count
+      shell: ss -s | grep TCP | head -1 | awk '{print $2}'
+      register: tcp_connections
+      changed_when: false
+      
+    - name: Evaluate CPU status
+      set_fact:
+        cpu_status: "{{ 'CRITICAL' if (cpu_usage.stdout | float > cpu_threshold) else 'OK' }}"
+        
+    - name: Evaluate memory status
+      set_fact:
+        memory_status: "{{ 'CRITICAL' if (memory_usage.stdout | int > memory_threshold) else 'OK' }}"
+        
+    - name: Evaluate disk status
+      set_fact:
+        disk_status: "{{ 'CRITICAL' if (disk_usage.stdout | int > disk_threshold) else 'OK' }}"
+        
+    - name: Evaluate load status
+      set_fact:
+        load_status: "{{ 'CRITICAL' if (load_average.stdout | float > load_threshold) else 'OK' }}"
+        
+    - name: Display health summary
+      debug:
+        msg:
+          - "=== SYSTEM HEALTH SUMMARY for {{ inventory_hostname }} ==="
+          - "CPU Usage: {{ cpu_usage.stdout }}% [{{ cpu_status }}]"
+          - "Memory Usage: {{ memory_usage.stdout }}% [{{ memory_status }}]"
+          - "Disk Usage: {{ disk_usage.stdout }}% [{{ disk_status }}]"
+          - "Load Average: {{ load_average.stdout }} [{{ load_status }}]"
+          - "Running Processes: {{ process_count.stdout }}"
+          - "Zombie Processes: {{ zombie_count.stdout }}"
+          - "Failed Services: {{ failed_services_count.stdout }}"
+          - "TCP Connections: {{ tcp_connections.stdout }}"
+          
+    - name: Display failed services
+      debug:
+        msg: "Failed services: {{ failed_services.stdout_lines }}"
+      when: failed_services_count.stdout | int > 0
+      
+    - name: Generate alert for critical issues
+      copy:
+        content: |
+          ========================================
+          SYSTEM HEALTH ALERT
+          ========================================
+          Server: {{ inventory_hostname }}
+          Time: {{ ansible_date_time.iso8601 }}
+          
+          CRITICAL ISSUES DETECTED:
+          {% if cpu_status == 'CRITICAL' %}
+          - CPU Usage: {{ cpu_usage.stdout }}% (Threshold: {{ cpu_threshold }}%)
+          {% endif %}
+          {% if memory_status == 'CRITICAL' %}
+          - Memory Usage: {{ memory_usage.stdout }}% (Threshold: {{ memory_threshold }}%)
+          {% endif %}
+          {% if disk_status == 'CRITICAL' %}
+          - Disk Usage: {{ disk_usage.stdout }}% (Threshold: {{ disk_threshold }}%)
+          {% endif %}
+          {% if load_status == 'CRITICAL' %}
+          - Load Average: {{ load_average.stdout }} (Threshold: {{ load_threshold }})
+          {% endif %}
+          {% if zombie_count.stdout | int > 0 %}
+          - Zombie Processes: {{ zombie_count.stdout }}
+          {% endif %}
+          {% if failed_services_count.stdout | int > 0 %}
+          - Failed Services: {{ failed_services_count.stdout }}
+            {{ failed_services.stdout }}
+          {% endif %}
+          
+          IMMEDIATE ACTION REQUIRED!
+          ========================================
+        dest: "/tmp/health_alert_{{ inventory_hostname }}_{{ ansible_date_time.epoch }}.txt"
+        mode: '0644'
+      when: 
+        - generate_alert
+        - (cpu_status == 'CRITICAL' or memory_status == 'CRITICAL' or 
+           disk_status == 'CRITICAL' or load_status == 'CRITICAL' or
+           zombie_count.stdout | int > 0 or failed_services_count.stdout | int > 0)
+      register: alert_generated
+      
+    - name: Fetch alert file
+      fetch:
+        src: "/tmp/health_alert_{{ inventory_hostname }}_{{ ansible_date_time.epoch }}.txt"
+        dest: "./alerts/alert_{{ inventory_hostname }}_{{ ansible_date_time.epoch }}.txt"
+        flat: yes
+      when: alert_generated is changed
+      
+    - name: Display alert notification
+      debug:
+        msg: "CRITICAL: Alert generated for {{ inventory_hostname }}! Check ./alerts/ directory"
+      when: alert_generated is changed

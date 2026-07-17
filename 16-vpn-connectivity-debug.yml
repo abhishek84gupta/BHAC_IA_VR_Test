@@ -1,0 +1,462 @@
+---
+# VPN Connectivity Debugging Playbook
+# Purpose: Diagnose and troubleshoot VPN connectivity issues on Windows and Linux systems
+# Supports: Windows, RHEL/CentOS, Ubuntu/Debian, SUSE, Fedora, Amazon Linux
+# Usage: ansible-playbook playbooks/16-vpn-connectivity-debug.yml -e "target_hostname=192.168.1.100"
+# Or: ansible-playbook playbooks/16-vpn-connectivity-debug.yml -e "target_hostname=server01.example.com"
+
+- name: Validate hostname variable
+  hosts: localhost
+  gather_facts: no
+  connection: local
+  
+  tasks:
+    - name: Check if target_hostname variable is defined
+      fail:
+        msg: |
+          ERROR: target_hostname variable is required but not provided!
+          
+          Please provide the hostname using one of these methods:
+          1. Command line: ansible-playbook playbooks/16-vpn-connectivity-debug.yml -e "target_hostname=192.168.1.100"
+          2. Command line: ansible-playbook playbooks/16-vpn-connectivity-debug.yml -e "target_hostname=server.example.com"
+          3. Variable file: ansible-playbook playbooks/16-vpn-connectivity-debug.yml -e "@vars.yml"
+          
+          The target_hostname can be:
+          - IP address (e.g., 192.168.1.100)
+          - Fully qualified domain name (e.g., server.example.com)
+          - Short hostname (e.g., vpnclient01)
+          
+          Supported Operating Systems:
+          - Windows (Server 2012+, 10, 11)
+          - RHEL/CentOS/Rocky/AlmaLinux (7, 8, 9)
+          - Ubuntu/Debian
+          - SUSE/openSUSE
+          - Fedora
+          - Amazon Linux
+      when: target_hostname is not defined or target_hostname == ''
+      
+    - name: Display target information
+      debug:
+        msg:
+          - "=== Validation Successful ==="
+          - "Target hostname: {{ target_hostname }}"
+          - "Proceeding with VPN connectivity diagnostics..."
+      when: target_hostname is defined and target_hostname != ''
+
+    - name: Add target host dynamically to inventory
+      add_host:
+        name: "{{ target_hostname }}"
+        groups: vpn_debug_targets
+        ansible_connection: "{{ ansible_connection | default('ssh') }}"
+      when: target_hostname is defined and target_hostname != ''
+
+- name: VPN Connectivity Debug - Multi-OS Support
+  hosts: vpn_debug_targets
+  gather_facts: yes
+  become: yes
+  
+  vars:
+    vpn_report_file: "/tmp/vpn_debug_report_{{ ansible_date_time.epoch }}.txt"
+    vpn_common_endpoints:
+      - "8.8.8.8"
+      - "1.1.1.1"
+      - "google.com"
+    vpn_check_ports:
+      - 443
+      - 1194
+      - 500
+      - 4500
+  
+  tasks:
+    - name: Display OS information
+      debug:
+        msg:
+          - "=== System Information ==="
+          - "OS Family: {{ ansible_os_family }}"
+          - "Distribution: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "Hostname: {{ ansible_hostname }}"
+          - "Architecture: {{ ansible_architecture }}"
+    
+    # ==================== WINDOWS VPN DIAGNOSTICS ====================
+    - name: Windows - Check VPN adapter status
+      win_shell: |
+        Get-NetAdapter | Where-Object {$_.InterfaceDescription -match 'VPN|TAP|WAN|PPP'} | 
+        Select-Object Name, Status, InterfaceDescription, LinkSpeed | Format-List
+      register: win_vpn_adapters
+      when: ansible_os_family == 'Windows'
+      ignore_errors: yes
+    
+    - name: Windows - Display VPN adapter status
+      debug:
+        msg: "{{ win_vpn_adapters.stdout_lines }}"
+      when: ansible_os_family == 'Windows' and win_vpn_adapters is defined
+    
+    - name: Windows - Check VPN connections
+      win_shell: |
+        Get-VpnConnection | Select-Object Name, ConnectionStatus, ServerAddress, TunnelType | Format-List
+      register: win_vpn_connections
+      when: ansible_os_family == 'Windows'
+      ignore_errors: yes
+    
+    - name: Windows - Display VPN connections
+      debug:
+        msg: "{{ win_vpn_connections.stdout_lines }}"
+      when: ansible_os_family == 'Windows' and win_vpn_connections is defined
+    
+    - name: Windows - Check routing table for VPN routes
+      win_shell: |
+        Get-NetRoute | Where-Object {$_.InterfaceAlias -match 'VPN|PPP|WAN'} | 
+        Select-Object DestinationPrefix, NextHop, InterfaceAlias, RouteMetric | Format-Table -AutoSize
+      register: win_vpn_routes
+      when: ansible_os_family == 'Windows'
+      ignore_errors: yes
+    
+    - name: Windows - Display VPN routes
+      debug:
+        msg: "{{ win_vpn_routes.stdout_lines }}"
+      when: ansible_os_family == 'Windows' and win_vpn_routes is defined
+    
+    - name: Windows - Check VPN-related processes
+      win_shell: |
+        Get-Process | Where-Object {$_.ProcessName -match 'vpn|openvpn|cisco|fortinet|palo|checkpoint'} | 
+        Select-Object ProcessName, Id, CPU, WorkingSet | Format-Table -AutoSize
+      register: win_vpn_processes
+      when: ansible_os_family == 'Windows'
+      ignore_errors: yes
+    
+    - name: Windows - Display VPN processes
+      debug:
+        msg: "{{ win_vpn_processes.stdout_lines }}"
+      when: ansible_os_family == 'Windows' and win_vpn_processes is defined
+    
+    - name: Windows - Check VPN-related services
+      win_shell: |
+        Get-Service | Where-Object {$_.DisplayName -match 'VPN|OpenVPN|Cisco|Fortinet|Palo|TAP'} | 
+        Select-Object Name, Status, StartType, DisplayName | Format-Table -AutoSize
+      register: win_vpn_services
+      when: ansible_os_family == 'Windows'
+      ignore_errors: yes
+    
+    - name: Windows - Display VPN services
+      debug:
+        msg: "{{ win_vpn_services.stdout_lines }}"
+      when: ansible_os_family == 'Windows' and win_vpn_services is defined
+    
+    - name: Windows - Check DNS configuration
+      win_shell: |
+        Get-DnsClientServerAddress | Where-Object {$_.ServerAddresses -ne $null} | 
+        Select-Object InterfaceAlias, ServerAddresses | Format-List
+      register: win_dns_config
+      when: ansible_os_family == 'Windows'
+      ignore_errors: yes
+    
+    - name: Windows - Display DNS configuration
+      debug:
+        msg: "{{ win_dns_config.stdout_lines }}"
+      when: ansible_os_family == 'Windows' and win_dns_config is defined
+    
+    - name: Windows - Test network connectivity
+      win_shell: |
+        $results = @()
+        @('8.8.8.8', 'google.com') | ForEach-Object {
+          $ping = Test-Connection -ComputerName $_ -Count 2 -Quiet
+          $results += "$_ : $(if($ping){'Reachable'}else{'Unreachable'})"
+        }
+        $results -join "`n"
+      register: win_connectivity_test
+      when: ansible_os_family == 'Windows'
+      ignore_errors: yes
+    
+    - name: Windows - Display connectivity test results
+      debug:
+        msg: "{{ win_connectivity_test.stdout_lines }}"
+      when: ansible_os_family == 'Windows' and win_connectivity_test is defined
+    
+    - name: Windows - Check firewall rules for VPN
+      win_shell: |
+        Get-NetFirewallRule | Where-Object {$_.DisplayName -match 'VPN|OpenVPN|IPSec|L2TP|PPTP'} | 
+        Select-Object DisplayName, Enabled, Direction, Action | Format-Table -AutoSize
+      register: win_firewall_rules
+      when: ansible_os_family == 'Windows'
+      ignore_errors: yes
+    
+    - name: Windows - Display firewall rules
+      debug:
+        msg: "{{ win_firewall_rules.stdout_lines }}"
+      when: ansible_os_family == 'Windows' and win_firewall_rules is defined
+    
+    - name: Windows - Check event logs for VPN errors
+      win_shell: |
+        Get-EventLog -LogName System -Newest 50 | 
+        Where-Object {$_.Source -match 'RAS|VPN|RemoteAccess' -or $_.Message -match 'VPN|tunnel|connection'} | 
+        Select-Object TimeGenerated, EntryType, Source, Message | Format-List
+      register: win_vpn_logs
+      when: ansible_os_family == 'Windows'
+      ignore_errors: yes
+    
+    - name: Windows - Display VPN-related logs
+      debug:
+        msg: "{{ win_vpn_logs.stdout_lines }}"
+      when: ansible_os_family == 'Windows' and win_vpn_logs is defined
+    
+    # ==================== LINUX VPN DIAGNOSTICS ====================
+    - name: Linux - Check network interfaces
+      shell: |
+        echo "=== All Network Interfaces ==="
+        ip addr show
+        echo -e "\n=== VPN-related Interfaces ==="
+        ip addr show | grep -E "tun|tap|ppp|wg" || echo "No VPN interfaces found"
+      register: linux_interfaces
+      when: ansible_os_family != 'Windows'
+      ignore_errors: yes
+    
+    - name: Linux - Display network interfaces
+      debug:
+        msg: "{{ linux_interfaces.stdout_lines }}"
+      when: ansible_os_family != 'Windows' and linux_interfaces is defined
+    
+    - name: Linux - Check routing table
+      shell: |
+        echo "=== IPv4 Routing Table ==="
+        ip route show
+        echo -e "\n=== IPv6 Routing Table ==="
+        ip -6 route show
+        echo -e "\n=== Default Gateway ==="
+        ip route | grep default
+      register: linux_routing
+      when: ansible_os_family != 'Windows'
+      ignore_errors: yes
+    
+    - name: Linux - Display routing table
+      debug:
+        msg: "{{ linux_routing.stdout_lines }}"
+      when: ansible_os_family != 'Windows' and linux_routing is defined
+    
+    - name: Linux - Check VPN processes
+      shell: |
+        echo "=== VPN-related Processes ==="
+        ps aux | grep -E "vpn|openvpn|wireguard|ipsec|pptp|l2tp|strongswan|openconnect|cisco" | grep -v grep || echo "No VPN processes found"
+      register: linux_vpn_processes
+      when: ansible_os_family != 'Windows'
+      ignore_errors: yes
+    
+    - name: Linux - Display VPN processes
+      debug:
+        msg: "{{ linux_vpn_processes.stdout_lines }}"
+      when: ansible_os_family != 'Windows' and linux_vpn_processes is defined
+    
+    - name: Linux - Check VPN services status
+      shell: |
+        echo "=== VPN Service Status ==="
+        for service in openvpn openvpn-client openvpn-server strongswan ipsec wireguard wg-quick pptpd xl2tpd; do
+          if systemctl list-unit-files | grep -q "^${service}"; then
+            echo "Service: $service"
+            systemctl status $service --no-pager -l || true
+            echo "---"
+          fi
+        done
+      register: linux_vpn_services
+      when: ansible_os_family != 'Windows'
+      ignore_errors: yes
+    
+    - name: Linux - Display VPN services
+      debug:
+        msg: "{{ linux_vpn_services.stdout_lines }}"
+      when: ansible_os_family != 'Windows' and linux_vpn_services is defined
+    
+    - name: Linux - Check DNS configuration
+      shell: |
+        echo "=== DNS Resolvers ==="
+        if [ -f /etc/resolv.conf ]; then
+          cat /etc/resolv.conf
+        fi
+        echo -e "\n=== systemd-resolved Status ==="
+        if command -v resolvectl &> /dev/null; then
+          resolvectl status
+        elif command -v systemd-resolve &> /dev/null; then
+          systemd-resolve --status
+        fi
+      register: linux_dns_config
+      when: ansible_os_family != 'Windows'
+      ignore_errors: yes
+    
+    - name: Linux - Display DNS configuration
+      debug:
+        msg: "{{ linux_dns_config.stdout_lines }}"
+      when: ansible_os_family != 'Windows' and linux_dns_config is defined
+    
+    - name: Linux - Test network connectivity
+      shell: |
+        echo "=== Ping Tests ==="
+        for host in 8.8.8.8 1.1.1.1 google.com; do
+          echo "Testing $host:"
+          ping -c 2 -W 2 $host && echo "✓ Reachable" || echo "✗ Unreachable"
+          echo "---"
+        done
+      register: linux_connectivity
+      when: ansible_os_family != 'Windows'
+      ignore_errors: yes
+    
+    - name: Linux - Display connectivity tests
+      debug:
+        msg: "{{ linux_connectivity.stdout_lines }}"
+      when: ansible_os_family != 'Windows' and linux_connectivity is defined
+    
+    - name: Linux - Check iptables/firewall rules
+      shell: |
+        echo "=== IPTables Rules ==="
+        if command -v iptables &> /dev/null; then
+          iptables -L -n -v | head -50
+        fi
+        echo -e "\n=== NAT Rules ==="
+        if command -v iptables &> /dev/null; then
+          iptables -t nat -L -n -v | head -50
+        fi
+        echo -e "\n=== Firewalld Status ==="
+        if command -v firewall-cmd &> /dev/null; then
+          firewall-cmd --list-all
+        fi
+      register: linux_firewall
+      when: ansible_os_family != 'Windows'
+      ignore_errors: yes
+    
+    - name: Linux - Display firewall rules
+      debug:
+        msg: "{{ linux_firewall.stdout_lines }}"
+      when: ansible_os_family != 'Windows' and linux_firewall is defined
+    
+    - name: Linux - Check OpenVPN configuration
+      shell: |
+        echo "=== OpenVPN Configuration Files ==="
+        find /etc/openvpn -type f -name "*.conf" 2>/dev/null || echo "No OpenVPN config files found"
+        echo -e "\n=== OpenVPN Status Files ==="
+        find /var/run -name "openvpn*.status" 2>/dev/null | xargs cat 2>/dev/null || echo "No status files found"
+      register: linux_openvpn_config
+      when: ansible_os_family != 'Windows'
+      ignore_errors: yes
+    
+    - name: Linux - Display OpenVPN configuration
+      debug:
+        msg: "{{ linux_openvpn_config.stdout_lines }}"
+      when: ansible_os_family != 'Windows' and linux_openvpn_config is defined
+    
+    - name: Linux - Check WireGuard configuration
+      shell: |
+        echo "=== WireGuard Interfaces ==="
+        if command -v wg &> /dev/null; then
+          wg show
+        else
+          echo "WireGuard not installed"
+        fi
+      register: linux_wireguard
+      when: ansible_os_family != 'Windows'
+      ignore_errors: yes
+    
+    - name: Linux - Display WireGuard status
+      debug:
+        msg: "{{ linux_wireguard.stdout_lines }}"
+      when: ansible_os_family != 'Windows' and linux_wireguard is defined
+    
+    - name: Linux - Check IPSec/StrongSwan status
+      shell: |
+        echo "=== IPSec Status ==="
+        if command -v ipsec &> /dev/null; then
+          ipsec status
+        elif command -v strongswan &> /dev/null; then
+          strongswan status
+        else
+          echo "IPSec/StrongSwan not installed"
+        fi
+      register: linux_ipsec
+      when: ansible_os_family != 'Windows'
+      ignore_errors: yes
+    
+    - name: Linux - Display IPSec status
+      debug:
+        msg: "{{ linux_ipsec.stdout_lines }}"
+      when: ansible_os_family != 'Windows' and linux_ipsec is defined
+    
+    - name: Linux - Check recent VPN logs
+      shell: |
+        echo "=== Recent VPN-related Logs ==="
+        if command -v journalctl &> /dev/null; then
+          journalctl -u openvpn* -u strongswan -u ipsec -u wireguard -u wg-quick* --since "1 hour ago" --no-pager | tail -100
+        else
+          echo "=== Syslog VPN entries ==="
+          grep -iE "vpn|openvpn|wireguard|ipsec|tunnel" /var/log/syslog 2>/dev/null | tail -50 || \
+          grep -iE "vpn|openvpn|wireguard|ipsec|tunnel" /var/log/messages 2>/dev/null | tail -50 || \
+          echo "No VPN logs found"
+        fi
+      register: linux_vpn_logs
+      when: ansible_os_family != 'Windows'
+      ignore_errors: yes
+    
+    - name: Linux - Display VPN logs
+      debug:
+        msg: "{{ linux_vpn_logs.stdout_lines }}"
+      when: ansible_os_family != 'Windows' and linux_vpn_logs is defined
+    
+    - name: Linux - Check TCP/UDP listening ports for VPN
+      shell: |
+        echo "=== VPN-related Listening Ports ==="
+        if command -v ss &> /dev/null; then
+          ss -tulpn | grep -E ":443|:1194|:500|:4500|:1723|:1701"
+        elif command -v netstat &> /dev/null; then
+          netstat -tulpn | grep -E ":443|:1194|:500|:4500|:1723|:1701"
+        else
+          echo "Neither ss nor netstat available"
+        fi
+      register: linux_vpn_ports
+      when: ansible_os_family != 'Windows'
+      ignore_errors: yes
+    
+    - name: Linux - Display VPN ports
+      debug:
+        msg: "{{ linux_vpn_ports.stdout_lines }}"
+      when: ansible_os_family != 'Windows' and linux_vpn_ports is defined
+    
+    - name: Linux - Check certificate validity (OpenVPN)
+      shell: |
+        echo "=== Certificate Validity Check ==="
+        for cert in $(find /etc/openvpn -name "*.crt" 2>/dev/null); do
+          echo "Certificate: $cert"
+          openssl x509 -in "$cert" -noout -enddate 2>/dev/null || echo "Cannot read certificate"
+          echo "---"
+        done
+      register: linux_cert_check
+      when: ansible_os_family != 'Windows'
+      ignore_errors: yes
+    
+    - name: Linux - Display certificate information
+      debug:
+        msg: "{{ linux_cert_check.stdout_lines }}"
+      when: ansible_os_family != 'Windows' and linux_cert_check is defined
+    
+    # ==================== COMMON DIAGNOSTICS ====================
+    - name: Summary - Generate diagnostic summary
+      debug:
+        msg:
+          - "============================================"
+          - "    VPN CONNECTIVITY DIAGNOSTIC SUMMARY    "
+          - "============================================"
+          - "Target Host: {{ ansible_hostname }}"
+          - "OS: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "Timestamp: {{ ansible_date_time.iso8601 }}"
+          - "============================================"
+          - ""
+          - "RECOMMENDATIONS:"
+          - "1. Check if VPN client software is installed and running"
+          - "2. Verify VPN server address and credentials"
+          - "3. Ensure firewall allows VPN traffic (ports 443, 1194, 500, 4500)"
+          - "4. Check DNS resolution is working properly"
+          - "5. Verify routing table has correct VPN routes"
+          - "6. Review VPN logs for specific error messages"
+          - "7. Confirm certificates are valid and not expired"
+          - "8. Test basic network connectivity to VPN server"
+          - ""
+          - "COMMON VPN PORTS:"
+          - "- OpenVPN: 1194/UDP (default), 443/TCP (HTTPS)"
+          - "- IPSec: 500/UDP (IKE), 4500/UDP (NAT-T)"
+          - "- PPTP: 1723/TCP"
+          - "- L2TP: 1701/UDP"
+          - "- WireGuard: 51820/UDP (default)"

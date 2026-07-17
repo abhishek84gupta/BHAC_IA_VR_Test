@@ -1,0 +1,145 @@
+---
+# Playbook 7: Collect System Logs
+# Purpose: Gather various system logs for analysis and troubleshooting
+# Usage: ansible-playbook playbooks/07-collect-system-logs.yml
+
+- name: Collect system logs from remote servers
+  hosts: all
+  become: yes
+  
+  vars:
+    collection_dir: "./collected_logs"
+    days_to_collect: 7
+    compress_logs: yes
+    
+  tasks:
+    - name: Create local collection directory
+      file:
+        path: "{{ collection_dir }}/{{ inventory_hostname }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      become: no
+      
+    - name: Get current timestamp
+      set_fact:
+        timestamp: "{{ ansible_date_time.epoch }}"
+        
+    - name: Collect journalctl logs (systemd)
+      shell: |
+        journalctl --since "{{ days_to_collect }} days ago" > /tmp/journalctl_{{ timestamp }}.log
+      args:
+        creates: /tmp/journalctl_{{ timestamp }}.log
+      ignore_errors: yes
+      
+    - name: Collect syslog
+      shell: |
+        if [ -f /var/log/syslog ]; then
+          tail -n 10000 /var/log/syslog > /tmp/syslog_{{ timestamp }}.log
+        elif [ -f /var/log/messages ]; then
+          tail -n 10000 /var/log/messages > /tmp/messages_{{ timestamp }}.log
+        fi
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+      
+    - name: Collect auth logs
+      shell: |
+        if [ -f /var/log/auth.log ]; then
+          tail -n 5000 /var/log/auth.log > /tmp/auth_{{ timestamp }}.log
+        elif [ -f /var/log/secure ]; then
+          tail -n 5000 /var/log/secure > /tmp/secure_{{ timestamp }}.log
+        fi
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+      
+    - name: Collect kernel logs
+      shell: dmesg > /tmp/dmesg_{{ timestamp }}.log
+      ignore_errors: yes
+      
+    - name: Collect last login information
+      shell: last -n 100 > /tmp/last_logins_{{ timestamp }}.log
+      ignore_errors: yes
+      
+    - name: Collect failed login attempts
+      shell: lastb -n 100 > /tmp/failed_logins_{{ timestamp }}.log
+      ignore_errors: yes
+      
+    - name: Collect system information
+      shell: |
+        cat > /tmp/system_info_{{ timestamp }}.log << EOF
+        === System Information ===
+        Hostname: $(hostname)
+        Uptime: $(uptime)
+        Kernel: $(uname -r)
+        OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2)
+        
+        === Memory Usage ===
+        $(free -h)
+        
+        === Disk Usage ===
+        $(df -h)
+        
+        === CPU Info ===
+        $(lscpu | grep -E 'Model name|CPU\(s\)|Thread|Core')
+        
+        === Network Interfaces ===
+        $(ip addr show)
+        
+        === Active Connections ===
+        $(ss -tulpn | head -n 20)
+        
+        === Top Processes ===
+        $(ps aux --sort=-%mem | head -n 20)
+        EOF
+      args:
+        executable: /bin/bash
+      
+    - name: Find all collected log files
+      find:
+        paths: /tmp
+        patterns: "*_{{ timestamp }}.log"
+      register: collected_files
+      
+    - name: Create compressed archive of logs
+      archive:
+        path: "{{ collected_files.files | map(attribute='path') | list }}"
+        dest: "/tmp/logs_{{ inventory_hostname }}_{{ timestamp }}.tar.gz"
+        format: gz
+      when: compress_logs
+      register: archive_result
+      
+    - name: Fetch compressed logs to control node
+      fetch:
+        src: "/tmp/logs_{{ inventory_hostname }}_{{ timestamp }}.tar.gz"
+        dest: "{{ collection_dir }}/{{ inventory_hostname }}/logs_{{ timestamp }}.tar.gz"
+        flat: yes
+      when: compress_logs
+      
+    - name: Fetch individual log files (if not compressed)
+      fetch:
+        src: "{{ item.path }}"
+        dest: "{{ collection_dir }}/{{ inventory_hostname }}/{{ item.path | basename }}"
+        flat: yes
+      loop: "{{ collected_files.files }}"
+      when: not compress_logs
+      
+    - name: Cleanup temporary files on remote server
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ collected_files.files }}"
+      
+    - name: Cleanup compressed archive on remote server
+      file:
+        path: "/tmp/logs_{{ inventory_hostname }}_{{ timestamp }}.tar.gz"
+        state: absent
+      when: compress_logs
+      
+    - name: Display collection summary
+      debug:
+        msg:
+          - "Logs collected successfully from {{ inventory_hostname }}"
+          - "Number of log files: {{ collected_files.files | length }}"
+          - "Saved to: {{ collection_dir }}/{{ inventory_hostname }}/"

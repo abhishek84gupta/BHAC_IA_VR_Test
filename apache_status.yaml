@@ -1,0 +1,45 @@
+---
+# Play 1: Add the target host dynamically using extra vars
+- name: Add target host dynamically
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Add target host to runtime inventory
+      add_host:
+        name: dynamic_target
+        ansible_host: "{{ target_host }}"
+        ansible_user: "{{ target_user | default('root') }}"
+        ansible_connection: ssh
+        ansible_ssh_common_args: "-o ControlMaster=no -o StrictHostKeyChecking=no"
+        groups: dynamic_apache
+
+# Play 2: Run Apache checks on the dynamically added host
+- name: Get Apache server stats
+  hosts: dynamic_apache
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Check Apache service status
+      command: systemctl is-active httpd
+      register: apache_status
+      failed_when: false
+      changed_when: false
+
+    - name: Fail if Apache is not running
+      fail:
+        msg: "Apache service is not running on {{ inventory_hostname }}"
+      when: apache_status.stdout != "active"
+
+    - name: Fetch Apache server stats (machine-readable)
+      uri:
+        url: http://localhost/server-status?auto
+        return_content: true
+      register: apache_stats
+
+    - name: Output Apache stats
+      debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          stats: "{{ apache_stats.content }}"

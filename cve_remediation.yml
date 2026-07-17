@@ -1,0 +1,14 @@
+---
+- name: Update packages based on CVEs
+  hosts: "{{node}}"
+  become: yes
+  vars:
+    cve_list: "{{ cveid | default([]) }}"
+  tasks:
+    - name: Debug CVE list
+      ansible.builtin.debug:
+        msg: "CVE List: {{ cve_list }}"
+
+    - name: Update packages for each CVE
+      ansible.builtin.shell: "sudo dnf update --cve={{ item }} -y"
+      loop: "{{ cve_list }}"

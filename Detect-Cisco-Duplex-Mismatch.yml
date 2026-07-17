@@ -1,0 +1,109 @@
+---
+# Playbook: Detect Cisco IOS Interface Duplex Mismatch
+# Purpose: Simulate 'show interfaces gigabitethernet 0/1' and flag duplex mismatches
+#
+# CLI Example:
+#   ansible-playbook playbooks/Detect-Cisco-Duplex-Mismatch.yml
+#
+# Note: Uses a mocked ios_command response — no switch connection required.
+
+- name: Detect duplex mismatch on Cisco IOS interface
+  hosts: localhost
+  gather_facts: no
+  connection: local
+
+  vars:
+    target_interface: GigabitEthernet0/1
+    mock_show_interface_output: |
+      GigabitEthernet0/1 is up, line protocol is up (connected)
+        Hardware is Gigabit Ethernet, address is aabb.cc00.0101 (bia aabb.cc00.0101)
+        MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,
+           reliability 255/255, txload 12/255, rxload 8/255
+        Encapsulation ARPA, loopback not set
+        Keepalive set (10 sec)
+        Auto-duplex(Half), 100Mbps, media type is RJ45
+        output flow-control is unsupported, input flow-control is unsupported
+        Last input 00:00:02, output 00:00:01, output hang never
+        5 minute input rate 24000 bits/sec, 18 packets/sec
+        5 minute output rate 31000 bits/sec, 22 packets/sec
+           1847291 packets input, 412883901 bytes, 0 no buffer
+           Received 412 broadcasts (0 multicast)
+           0 runts, 0 giants, 0 throttles
+           1247 input errors, 892 CRC, 0 frame, 0 overrun, 0 ignored
+           0 watchdog, 0 multicast, 0 pause input
+           1620444 packets output, 389221044 bytes, 0 underruns
+           0 output errors, 15432 collisions, 2 interface resets
+
+  tasks:
+    - name: Simulate ios_command response (show interfaces gigabitethernet 0/1)
+      ansible.builtin.set_fact:
+        intf_output:
+          stdout:
+            - "{{ mock_show_interface_output }}"
+          stdout_lines:
+            - "{{ mock_show_interface_output.splitlines() }}"
+
+    - name: Parse interface operational and error counters
+      ansible.builtin.set_fact:
+        intf_text: "{{ intf_output.stdout[0] }}"
+        configured_duplex: >-
+          {{
+            'auto'
+            if ('Auto-duplex' in intf_output.stdout[0] or 'duplex auto' in intf_output.stdout[0])
+            else (
+              'full'
+              if 'Full-duplex' in intf_output.stdout[0]
+              else (
+                'half'
+                if 'Half-duplex' in intf_output.stdout[0]
+                else 'unknown'
+              )
+            )
+          }}
+        operational_duplex: >-
+          {{
+            'half'
+            if (
+              'Half-duplex' in intf_output.stdout[0]
+              or 'Auto-duplex(Half)' in intf_output.stdout[0]
+            )
+            else (
+              'full'
+              if (
+                'Full-duplex' in intf_output.stdout[0]
+                or 'Auto-duplex(Full)' in intf_output.stdout[0]
+              )
+              else 'unknown'
+            )
+          }}
+        collision_count: "{{ intf_output.stdout[0] | regex_search('(\\d+) collisions', '\\1') | first | default('0') }}"
+        crc_error_count: "{{ intf_output.stdout[0] | regex_search('(\\d+) CRC', '\\1') | first | default('0') }}"
+
+    - name: Evaluate duplex mismatch condition
+      ansible.builtin.set_fact:
+        duplex_mismatch: "{{ configured_duplex == 'auto' and operational_duplex == 'half' }}"
+
+    - name: Display parsed interface summary
+      ansible.builtin.debug:
+        msg:
+          - "Interface: {{ target_interface }}"
+          - "Configured duplex: {{ configured_duplex }}"
+          - "Operational duplex: {{ operational_duplex }}"
+          - "Collisions: {{ collision_count }}"
+          - "CRC errors: {{ crc_error_count }}"
+          - "Duplex mismatch: {{ duplex_mismatch }}"
+
+    - name: WARN - Duplex mismatch detected on interface
+      ansible.builtin.debug:
+        msg:
+          - "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+          - "!!  WARNING: DUPLEX MISMATCH DETECTED                       !!"
+          - "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+          - "!!  Interface : {{ target_interface }}"
+          - "!!  Configured : auto"
+          - "!!  Operational: half-duplex"
+          - "!!  Collisions : {{ collision_count }} (rising)"
+          - "!!  CRC errors: {{ crc_error_count }} (rising)"
+          - "!!  Action    : Verify peer port speed/duplex settings"
+          - "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+      when: duplex_mismatch | bool

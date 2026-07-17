@@ -1,0 +1,195 @@
+---
+# Playbook 3: Block Firewall Port
+# Purpose: Block a specific port using firewalld or iptables
+# 
+# CLI Examples:
+#   ansible-playbook playbooks/03-block-firewall-port.yml -e "port_to_block=8080"
+#   ansible-playbook playbooks/03-block-firewall-port.yml -e "target_host=webserver port_to_block=443 protocol=tcp"
+#   ansible-playbook playbooks/03-block-firewall-port.yml -e "target_host=dbserver port_to_block=3306"
+# 
+# AWX/Tower Example:
+#   Extra Variables: {"target_host": "webserver", "port_to_block": "8080", "protocol": "tcp"}
+#
+
+- name: Block firewall port on remote servers
+  hosts: "{{ target_host | default(default_target_host) }}"
+  become: yes
+  
+  vars:
+    # Configuration: Override these via extra_vars
+    default_target_host: "all"
+    default_port_to_block: "8080"
+    default_protocol: "tcp"
+    
+  tasks:
+    - name: Set firewall configuration (use extra_vars or defaults)
+      set_fact:
+        port_to_block: "{{ port_to_block | default(default_port_to_block) }}"
+        protocol: "{{ protocol | default(default_protocol) | lower }}"
+
+    - name: Display configuration
+      debug:
+        msg:
+          - "🎯 Target Host: {{ inventory_hostname }}"
+          - "🔒 Port to Block: {{ port_to_block }}"
+          - "📡 Protocol: {{ protocol | upper }}"
+
+    - name: Validate protocol
+      fail:
+        msg: "❌ ERROR: Invalid protocol '{{ protocol }}'. Valid protocols: tcp, udp"
+      when: protocol not in ['tcp', 'udp']
+
+    - name: Validate port number
+      fail:
+        msg: "❌ ERROR: Invalid port '{{ port_to_block }}'. Must be between 1-65535"
+      when: port_to_block | int < 1 or port_to_block | int > 65535
+
+    - name: Gather facts about the system
+      setup:
+        gather_subset:
+          - network
+          
+    - name: Initialize firewall method tracking
+      set_fact:
+        firewall_method: "unknown"
+        firewall_action_taken: false
+
+    - name: Check if firewalld is installed and running
+      systemd:
+        name: firewalld
+      register: firewalld_status
+      ignore_errors: yes
+      
+    - name: Block port using firewalld (RHEL/CentOS/Fedora)
+      block:
+        - name: Remove port from firewalld if it exists
+          firewalld:
+            port: "{{ port_to_block }}/{{ protocol }}"
+            permanent: yes
+            state: disabled
+            immediate: yes
+          register: firewalld_result
+          
+        - name: Add rich rule to explicitly block port
+          firewalld:
+            rich_rule: 'rule family="ipv4" port port="{{ port_to_block }}" protocol="{{ protocol }}" reject'
+            permanent: yes
+            state: enabled
+            immediate: yes
+            
+        - name: Reload firewalld
+          systemd:
+            name: firewalld
+            state: reloaded
+
+        - name: Set firewall method to firewalld
+          set_fact:
+            firewall_method: "firewalld"
+            firewall_action_taken: true
+            
+      when: 
+        - firewalld_status.status is defined
+        - firewalld_status.status.ActiveState == "active"
+        
+    - name: Block port using UFW (Ubuntu/Debian)
+      block:
+        - name: Check if UFW is installed
+          command: which ufw
+          register: ufw_check
+          ignore_errors: yes
+          changed_when: false
+          
+        - name: Deny port using UFW
+          ufw:
+            rule: deny
+            port: "{{ port_to_block }}"
+            proto: "{{ protocol }}"
+          register: ufw_result
+          when: ufw_check.rc == 0
+
+        - name: Set firewall method to UFW
+          set_fact:
+            firewall_method: "ufw"
+            firewall_action_taken: true
+          when: ufw_check.rc == 0
+          
+      when: 
+        - firewalld_status.status is not defined or firewalld_status.status.ActiveState != "active"
+        
+    - name: Block port using iptables (fallback)
+      iptables:
+        chain: INPUT
+        protocol: "{{ protocol }}"
+        destination_port: "{{ port_to_block }}"
+        jump: DROP
+        comment: "Block port {{ port_to_block }} via Ansible"
+      register: iptables_result
+      when: 
+        - firewalld_status.status is not defined or firewalld_status.status.ActiveState != "active"
+        - firewall_method == "unknown"
+
+    - name: Set firewall method to iptables
+      set_fact:
+        firewall_method: "iptables"
+        firewall_action_taken: true
+      when: 
+        - firewalld_status.status is not defined or firewalld_status.status.ActiveState != "active"
+        - iptables_result is defined
+        - iptables_result is changed
+        
+    - name: Save iptables rules
+      shell: |
+        if command -v iptables-save &> /dev/null; then
+          iptables-save > /etc/iptables/rules.v4 2>/dev/null || \
+          iptables-save > /etc/sysconfig/iptables 2>/dev/null || \
+          service iptables save 2>/dev/null || true
+        fi
+      when: 
+        - firewalld_status.status is not defined or firewalld_status.status.ActiveState != "active"
+      changed_when: false
+        
+    - name: Verify port is blocked (optional check)
+      shell: |
+        if command -v firewall-cmd &> /dev/null && systemctl is-active firewalld &> /dev/null; then
+          firewall-cmd --list-all | grep -q "{{ port_to_block }}" && echo "verified" || echo "not_verified"
+        elif command -v ufw &> /dev/null; then
+          ufw status | grep -q "{{ port_to_block }}" && echo "verified" || echo "not_verified"
+        elif command -v iptables &> /dev/null; then
+          iptables -L INPUT -n | grep -q "dpt:{{ port_to_block }}" && echo "verified" || echo "not_verified"
+        else
+          echo "unknown"
+        fi
+      register: verification_result
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Set firewall statistics for job template caller
+      set_stats:
+        data:
+          target_host: "{{ inventory_hostname }}"
+          port_blocked: "{{ port_to_block }}"
+          protocol: "{{ protocol }}"
+          firewall_method: "{{ firewall_method }}"
+          action_taken: "{{ firewall_action_taken }}"
+          verified: "{{ verification_result.stdout | default('unknown') }}"
+          status: "{{ 'SUCCESS' if firewall_action_taken else 'NO_ACTION' }}"
+          os_family: "{{ ansible_os_family | default('unknown') }}"
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+        aggregate: no
+        per_host: yes
+
+    - name: Final summary
+      debug:
+        msg:
+          - "=================================="
+          - "   FIREWALL BLOCKING SUMMARY"
+          - "=================================="
+          - "Host: {{ inventory_hostname }}"
+          - "OS Family: {{ ansible_os_family | default('unknown') }}"
+          - "Port Blocked: {{ port_to_block }}/{{ protocol | upper }}"
+          - "Firewall Method: {{ firewall_method | upper }}"
+          - "Action Taken: {{ '✅ Yes' if firewall_action_taken else '❌ No' }}"
+          - "Verification: {{ verification_result.stdout | default('unknown') | upper }}"
+          - "Status: {{ '✅ SUCCESS' if firewall_action_taken else '⚠️ NO ACTION TAKEN' }}"
+          - "=================================="
+          - "📊 Stats have been set and can be retrieved by the job template caller"

@@ -1,0 +1,42 @@
+---
+# Playbook: Ping Host
+# Purpose: Verify network connectivity from the AWX execution node
+#
+# Example Input:
+# {
+#   "target_host": "clm-pun-vhndmr"
+# }
+
+- name: Ping host from AWX
+  hosts: localhost
+  gather_facts: no
+  connection: local
+
+  tasks:
+    - name: Validate target_host is provided
+      fail:
+        msg: "target_host is required"
+      when: target_host is not defined or target_host == ""
+
+    - name: Ping target host
+      command: ping -c 4 {{ target_host }}
+      register: ping_output
+      changed_when: false
+      failed_when: false
+
+    - name: Export connectivity summary
+      set_stats:
+        data:
+          result: |
+            HOST CONNECTIVITY SUMMARY
+
+            Target Host: {{ target_host }}
+
+            Return Code: {{ ping_output.rc }}
+
+            Ping Output:
+            {{ ping_output.stdout | default(ping_output.stderr) }}
+
+            Status: {{ 'SUCCESS' if ping_output.rc == 0 else 'FAILED' }}
+        aggregate: no
+        per_host: no

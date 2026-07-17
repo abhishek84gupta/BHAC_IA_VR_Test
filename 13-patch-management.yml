@@ -1,0 +1,664 @@
+---
+# Additional Playbook: Multi-OS Patch Check (Read-Only)
+# Purpose: Check system patches and available updates across Windows and Linux systems WITHOUT applying changes
+# Supports: Windows, RHEL/CentOS, Ubuntu/Debian, SUSE, Arch, Alpine, Fedora, Amazon Linux
+# Usage: ansible-playbook playbooks/13-patch-management.yml -e "target_hostname=192.168.1.100"
+# Or: ansible-playbook playbooks/13-patch-management.yml -e "target_hostname=server01.example.com"
+
+- name: Validate hostname variable
+  hosts: localhost
+  gather_facts: no
+  connection: local
+  
+  tasks:
+    - name: Check if target_hostname variable is defined
+      fail:
+        msg: |
+          ERROR: target_hostname variable is required but not provided!
+          
+          Please provide the hostname using one of these methods:
+          1. Command line: ansible-playbook playbooks/13-patch-management.yml -e "target_hostname=192.168.1.100"
+          2. Command line: ansible-playbook playbooks/13-patch-management.yml -e "target_hostname=server.example.com"
+          3. Variable file: ansible-playbook playbooks/13-patch-management.yml -e "@vars.yml"
+          
+          The target_hostname can be:
+          - IP address (e.g., 192.168.1.100)
+          - Fully qualified domain name (e.g., server.example.com)
+          - Short hostname (e.g., webserver01)
+          
+          Supported Operating Systems:
+          - Windows (Server 2012+, 10, 11)
+          - RHEL/CentOS/Rocky/AlmaLinux (7, 8, 9)
+          - Ubuntu/Debian
+          - SUSE/openSUSE
+          - Arch Linux
+          - Alpine Linux
+          - Fedora
+          - Amazon Linux
+      when: target_hostname is not defined or target_hostname == ''
+      
+    - name: Display target information
+      debug:
+        msg:
+          - "=== Validation Successful ==="
+          - "Target hostname: {{ target_hostname }}"
+          - "Proceeding with patch check (READ-ONLY MODE)..."
+      when: target_hostname is defined and target_hostname != ''
+
+    - name: Add target host dynamically to inventory
+      add_host:
+        name: "{{ target_hostname }}"
+        groups: dynamic_targets
+        ansible_host: "{{ target_hostname }}"
+      when: target_hostname is defined and target_hostname != ''
+
+- name: Patch check for target server (READ-ONLY)
+  hosts: dynamic_targets
+  gather_facts: yes
+  
+  tasks:
+    # ==================== SET PRIVILEGE ESCALATION BASED ON OS ====================
+    - name: Set privilege escalation for the session
+      set_fact:
+        ansible_become: yes
+        ansible_become_method: "{{ 'runas' if ansible_os_family == 'Windows' else 'sudo' }}"
+      when: ansible_os_family is defined
+    
+    # ==================== OS DETECTION ====================
+    - name: Display target host information
+      debug:
+        msg:
+          - "============================================"
+          - "    PATCH CHECK REPORT (READ-ONLY MODE)"
+          - "============================================"
+          - "Target: {{ target_hostname }}"
+          - "Hostname: {{ ansible_hostname }}"
+          - "FQDN: {{ ansible_fqdn | default('N/A') }}"
+          - "IP Address: {{ ansible_default_ipv4.address | default(ansible_ip_addresses[0] | default('N/A')) }}"
+          - "OS Family: {{ ansible_os_family }}"
+          - "Distribution: {{ ansible_distribution }} {{ ansible_distribution_version | default('') }}"
+          - "Architecture: {{ ansible_architecture }}"
+          - "System: {{ ansible_system }}"
+          - "============================================"
+    
+    # ==================== WINDOWS SECTION ====================
+    - name: Windows - Get installed hotfixes count
+      win_shell: (Get-HotFix | Measure-Object).Count
+      register: windows_hotfix_count
+      when: ansible_os_family == "Windows"
+      changed_when: false
+      ignore_errors: yes
+      
+    - name: Windows - Get recent installed hotfixes
+      win_shell: Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 15 HotFixID, Description, InstalledBy, InstalledOn | Format-Table -AutoSize | Out-String
+      register: windows_recent_hotfixes
+      when: ansible_os_family == "Windows"
+      changed_when: false
+      ignore_errors: yes
+      
+    - name: Windows - Get last boot time
+      win_shell: |
+        $os = Get-CimInstance Win32_OperatingSystem
+        $bootTime = $os.LastBootUpTime
+        $uptime = (Get-Date) - $bootTime
+        Write-Output "Last Boot: $($bootTime.ToString('yyyy-MM-dd HH:mm:ss')) | Uptime: $($uptime.Days) days, $($uptime.Hours) hours, $($uptime.Minutes) minutes"
+      register: windows_boot_time
+      when: ansible_os_family == "Windows"
+      changed_when: false
+      
+    - name: Windows - Display installed patches summary
+      debug:
+        msg:
+          - ""
+          - "=== WINDOWS INSTALLED PATCHES ==="
+          - "Total hotfixes installed: {{ windows_hotfix_count.stdout | trim }}"
+          - "{{ windows_boot_time.stdout }}"
+          - ""
+          - "Recent hotfixes (last 15):"
+          - "{{ windows_recent_hotfixes.stdout }}"
+      register: windows_patches_summary
+      when: ansible_os_family == "Windows"
+      
+    - name: Windows - Set patches summary as job output
+      set_stats:
+        data:
+          windows_total_hotfixes: "{{ windows_hotfix_count.stdout | trim }}"
+          windows_boot_info: "{{ windows_boot_time.stdout }}"
+          windows_recent_hotfixes: "{{ windows_recent_hotfixes.stdout }}"
+        per_host: yes
+      when: ansible_os_family == "Windows"
+      
+    - name: Windows - Check for available updates
+      win_updates:
+        state: searched
+        category_names:
+          - SecurityUpdates
+          - CriticalUpdates
+          - UpdateRollups
+          - Updates
+      register: windows_available_updates
+      when: ansible_os_family == "Windows"
+      changed_when: false
+      ignore_errors: yes
+      
+    - name: Windows - Count update categories
+      set_fact:
+        windows_critical_count: "{{ windows_available_updates.updates | default([]) | selectattr('categories', 'contains', 'Critical Updates') | list | length }}"
+        windows_security_count: "{{ windows_available_updates.updates | default([]) | selectattr('categories', 'contains', 'Security Updates') | list | length }}"
+      when: ansible_os_family == "Windows"
+      
+    - name: Windows - Display available updates
+      debug:
+        msg:
+          - ""
+          - "=== WINDOWS AVAILABLE UPDATES ==="
+          - "Total available updates: {{ windows_available_updates.found_update_count | default(0) }}"
+          - "  - Critical Updates: {{ windows_critical_count | default(0) }}"
+          - "  - Security Updates: {{ windows_security_count | default(0) }}"
+          - ""
+          - "Update Details:"
+      when: ansible_os_family == "Windows"
+      
+    - name: Windows - List available updates details
+      debug:
+        msg: "  - {{ item.title }} ({{ item.kb | default('No KB') }})"
+      loop: "{{ windows_available_updates.updates | default([]) }}"
+      when: 
+        - ansible_os_family == "Windows"
+        - windows_available_updates.updates is defined
+      loop_control:
+        label: "{{ item.kb | default('No KB') }}"
+      
+    - name: Windows - Check if reboot is required
+      win_shell: |
+        if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") {
+          Write-Output "YES - Reboot pending for previous updates"
+        } else {
+          Write-Output "NO"
+        }
+      register: windows_reboot_status
+      when: ansible_os_family == "Windows"
+      changed_when: false
+    
+    - name: Windows - Display reboot status
+      debug:
+        msg: "Reboot Required: {{ windows_reboot_status.stdout | trim }}"
+      when: ansible_os_family == "Windows"
+    
+    # ==================== RHEL/CENTOS/FEDORA/ROCKY/ALMA SECTION ====================
+    - name: RHEL - List installed packages count
+      shell: rpm -qa | wc -l
+      register: rhel_installed_count
+      changed_when: false
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+      
+    - name: RHEL - Get recent installed patches
+      shell: rpm -qa --last | head -20
+      register: rhel_recent_patches
+      changed_when: false
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+      
+    - name: RHEL - Get system uptime
+      shell: uptime -s
+      register: rhel_boot_time
+      changed_when: false
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+      
+    - name: RHEL - Get current kernel
+      shell: uname -r
+      register: rhel_current_kernel
+      changed_when: false
+      when: ansible_os_family == "RedHat"
+      
+    - name: RHEL - Display installed patches summary
+      debug:
+        msg:
+          - ""
+          - "=== RHEL/CENTOS INSTALLED PATCHES ==="
+          - "Total installed packages: {{ rhel_installed_count.stdout }}"
+          - "Current kernel: {{ rhel_current_kernel.stdout }}"
+          - "System boot time: {{ rhel_boot_time.stdout | default('N/A') }}"
+          - ""
+          - "Recent installations (last 20):"
+          - "{{ rhel_recent_patches.stdout_lines }}"
+      register: rhel_packages_summary
+      when: ansible_os_family == "RedHat"
+      
+    - name: RHEL - Set packages summary as job output
+      set_stats:
+        data:
+          rhel_total_packages: "{{ rhel_installed_count.stdout }}"
+          rhel_current_kernel: "{{ rhel_current_kernel.stdout }}"
+        aggregate: yes
+      when: ansible_os_family == "RedHat"
+      
+    - name: RHEL - Check for available updates (detailed)
+      shell: |
+        if command -v dnf &> /dev/null; then
+          dnf check-update -q 2>/dev/null | grep -v "^$" | grep -v "Last metadata" || echo "No updates available"
+        else
+          yum check-update -q 2>/dev/null | grep -v "^$" || echo "No updates available"
+        fi
+      register: rhel_updates_detailed
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "RedHat"
+      
+    - name: RHEL - Count available updates
+      shell: |
+        if command -v dnf &> /dev/null; then
+          dnf check-update -q 2>/dev/null | grep -v "^$" | grep -v "Last metadata" | wc -l
+        else
+          yum check-update -q 2>/dev/null | grep -v "^$" | wc -l
+        fi
+      register: rhel_updates_count
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "RedHat"
+      
+    - name: RHEL - Check security updates
+      shell: |
+        if command -v dnf &> /dev/null; then
+          dnf updateinfo list security 2>/dev/null | grep -i "security" | wc -l
+        else
+          yum updateinfo list security 2>/dev/null | grep -i "security" | wc -l
+        fi
+      register: rhel_security_updates
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "RedHat"
+      
+    - name: RHEL - Display available updates
+      debug:
+        msg:
+          - ""
+          - "=== RHEL/CENTOS AVAILABLE UPDATES ==="
+          - "Total available updates: {{ rhel_updates_count.stdout | default('0') }}"
+          - "Security updates: {{ rhel_security_updates.stdout | default('0') }}"
+          - ""
+          - "Update Details:"
+          - "{{ rhel_updates_detailed.stdout_lines }}"
+      when: ansible_os_family == "RedHat"
+      
+    - name: RHEL - Set available updates as job output
+      set_stats:
+        data:
+          rhel_available_updates: "{{ rhel_updates_count.stdout | default('0') }}"
+          rhel_security_updates: "{{ rhel_security_updates.stdout | default('0') }}"
+          rhel_updates_list: "{{ rhel_updates_detailed.stdout_lines | join('\n') }}"
+        aggregate: yes
+      when: ansible_os_family == "RedHat"
+      
+    - name: RHEL - Check if reboot is required
+      shell: needs-restarting -r
+      register: rhel_reboot_check
+      failed_when: false
+      changed_when: false
+      when: ansible_os_family == "RedHat"
+      
+    - name: RHEL - Display reboot status
+      debug:
+        msg: "Reboot Required: {{ 'YES - System restart recommended' if rhel_reboot_check.rc == 1 else 'NO' }}"
+      when: ansible_os_family == "RedHat"
+    
+    # ==================== UBUNTU/DEBIAN SECTION ====================
+    - name: Debian - List installed packages count
+      shell: dpkg -l | grep '^ii' | wc -l
+      register: debian_installed_count
+      changed_when: false
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+      
+    - name: Debian - Get recent installed patches
+      shell: grep " install " /var/log/dpkg.log 2>/dev/null | tail -20 || echo "No dpkg log available"
+      register: debian_recent_patches
+      changed_when: false
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+      
+    - name: Debian - Get system uptime
+      shell: uptime -s
+      register: debian_boot_time
+      changed_when: false
+      when: ansible_os_family == "Debian"
+      
+    - name: Debian - Get current kernel
+      shell: uname -r
+      register: debian_current_kernel
+      changed_when: false
+      when: ansible_os_family == "Debian"
+      
+    - name: Debian - Display installed patches summary
+      debug:
+        msg:
+          - ""
+          - "=== DEBIAN/UBUNTU INSTALLED PATCHES ==="
+          - "Total installed packages: {{ debian_installed_count.stdout }}"
+          - "Current kernel: {{ debian_current_kernel.stdout }}"
+          - "System boot time: {{ debian_boot_time.stdout }}"
+          - ""
+          - "Recent installations (last 20):"
+          - "{{ debian_recent_patches.stdout_lines }}"
+      register: debian_packages_summary
+      when: ansible_os_family == "Debian"
+      
+    - name: Debian - Set packages summary as job output
+      set_stats:
+        data:
+          debian_total_packages: "{{ debian_installed_count.stdout }}"
+          debian_current_kernel: "{{ debian_current_kernel.stdout }}"
+          debian_boot_time: "{{ debian_boot_time.stdout }}"
+          debian_recent_patches: "{{ debian_recent_patches.stdout_lines | join(', ') }}"
+        per_host: yes
+      when: ansible_os_family == "Debian"
+      
+    - name: Debian - Update package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+      changed_when: false
+      
+    - name: Debian - Get available updates list
+      shell: apt list --upgradable 2>/dev/null | tail -n +2
+      register: debian_updates_list
+      changed_when: false
+      when: ansible_os_family == "Debian"
+      
+    - name: Debian - Count available updates
+      shell: apt list --upgradable 2>/dev/null | tail -n +2 | wc -l
+      register: debian_updates_count
+      changed_when: false
+      when: ansible_os_family == "Debian"
+      
+    - name: Debian - Check security updates
+      shell: apt list --upgradable 2>/dev/null | grep -i security | wc -l
+      register: debian_security_updates
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "Debian"
+      
+    - name: Debian - Display available updates
+      debug:
+        msg:
+          - ""
+          - "=== DEBIAN/UBUNTU AVAILABLE UPDATES ==="
+          - "Total available updates: {{ debian_updates_count.stdout | default('0') }}"
+          - "Security updates: {{ debian_security_updates.stdout | default('0') }}"
+          - ""
+          - "Update Details:"
+          - "{{ debian_updates_list.stdout_lines }}"
+      when: ansible_os_family == "Debian"
+      
+    - name: Debian - Check if reboot is required
+      stat:
+        path: /var/run/reboot-required
+      register: debian_reboot_file
+      when: ansible_os_family == "Debian"
+      
+    - name: Debian - Get reboot reason
+      shell: cat /var/run/reboot-required.pkgs 2>/dev/null || echo "N/A"
+      register: debian_reboot_reason
+      changed_when: false
+      when: 
+        - ansible_os_family == "Debian"
+        - debian_reboot_file.stat.exists | default(false)
+      
+    - name: Debian - Display reboot status
+      debug:
+        msg: 
+          - "Reboot Required: {{ 'YES - Packages requiring reboot:' if debian_reboot_file.stat.exists else 'NO' }}"
+          - "{{ debian_reboot_reason.stdout_lines | default([]) }}"
+      when: ansible_os_family == "Debian"
+    
+    # ==================== SUSE SECTION ====================
+    - name: SUSE - List installed packages count
+      shell: rpm -qa | wc -l
+      register: suse_installed_count
+      changed_when: false
+      when: ansible_os_family == "Suse"
+      ignore_errors: yes
+      
+    - name: SUSE - Get recent installed patches
+      shell: rpm -qa --last | head -20
+      register: suse_recent_patches
+      changed_when: false
+      when: ansible_os_family == "Suse"
+      ignore_errors: yes
+      
+    - name: SUSE - Get current kernel
+      shell: uname -r
+      register: suse_current_kernel
+      changed_when: false
+      when: ansible_os_family == "Suse"
+      
+    - name: SUSE - Display installed patches summary
+      debug:
+        msg:
+          - ""
+          - "=== SUSE INSTALLED PATCHES ==="
+          - "Total installed packages: {{ suse_installed_count.stdout }}"
+          - "Current kernel: {{ suse_current_kernel.stdout }}"
+          - ""
+          - "Recent installations (last 20):"
+          - "{{ suse_recent_patches.stdout_lines }}"
+      register: suse_packages_summary
+      when: ansible_os_family == "Suse"
+      
+    - name: SUSE - Set packages summary as job output
+      set_stats:
+        data:
+          suse_total_packages: "{{ suse_installed_count.stdout }}"
+          suse_current_kernel: "{{ suse_current_kernel.stdout }}"
+          suse_recent_patches: "{{ suse_recent_patches.stdout_lines | join(', ') }}"
+        per_host: yes
+      when: ansible_os_family == "Suse"
+      
+    - name: SUSE - Refresh repositories
+      command: zypper refresh
+      changed_when: false
+      when: ansible_os_family == "Suse"
+      ignore_errors: yes
+      
+    - name: SUSE - List available updates
+      shell: zypper list-updates 2>/dev/null
+      register: suse_updates_list
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "Suse"
+      
+    - name: SUSE - Count available updates
+      shell: zypper list-updates 2>/dev/null | grep '^v ' | wc -l
+      register: suse_updates_count
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "Suse"
+      
+    - name: SUSE - Display available updates
+      debug:
+        msg:
+          - ""
+          - "=== SUSE AVAILABLE UPDATES ==="
+          - "Total available updates: {{ suse_updates_count.stdout | default('0') }}"
+          - ""
+          - "Update Details:"
+          - "{{ suse_updates_list.stdout_lines }}"
+      when: ansible_os_family == "Suse"
+    
+    # ==================== ARCH LINUX SECTION ====================
+    - name: Arch - List installed packages count
+      shell: pacman -Q | wc -l
+      register: arch_installed_count
+      changed_when: false
+      when: ansible_os_family == "Archlinux"
+      ignore_errors: yes
+      
+    - name: Arch - Get recent installed patches
+      shell: grep "\[ALPM\] installed\|upgraded" /var/log/pacman.log | tail -20
+      register: arch_recent_patches
+      changed_when: false
+      when: ansible_os_family == "Archlinux"
+      ignore_errors: yes
+      
+    - name: Arch - Get current kernel
+      shell: uname -r
+      register: arch_current_kernel
+      changed_when: false
+      when: ansible_os_family == "Archlinux"
+      
+    - name: Arch - Display installed patches summary
+      debug:
+        msg:
+          - ""
+          - "=== ARCH LINUX INSTALLED PATCHES ==="
+          - "Total installed packages: {{ arch_installed_count.stdout }}"
+          - "Current kernel: {{ arch_current_kernel.stdout }}"
+          - ""
+          - "Recent installations (last 20):"
+          - "{{ arch_recent_patches.stdout_lines }}"
+      register: arch_packages_summary
+      when: ansible_os_family == "Archlinux"
+      
+    - name: Arch - Set packages summary as job output
+      set_stats:
+        data:
+          arch_total_packages: "{{ arch_installed_count.stdout }}"
+          arch_current_kernel: "{{ arch_current_kernel.stdout }}"
+          arch_recent_patches: "{{ arch_recent_patches.stdout_lines | join(', ') }}"
+        per_host: yes
+      when: ansible_os_family == "Archlinux"
+      
+    - name: Arch - Sync package database
+      command: pacman -Sy
+      changed_when: false
+      when: ansible_os_family == "Archlinux"
+      
+    - name: Arch - List available updates
+      shell: pacman -Qu
+      register: arch_updates_list
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "Archlinux"
+      
+    - name: Arch - Count available updates
+      shell: pacman -Qu | wc -l
+      register: arch_updates_count
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "Archlinux"
+      
+    - name: Arch - Display available updates
+      debug:
+        msg:
+          - ""
+          - "=== ARCH LINUX AVAILABLE UPDATES ==="
+          - "Total available updates: {{ arch_updates_count.stdout | default('0') }}"
+          - ""
+          - "Update Details:"
+          - "{{ arch_updates_list.stdout_lines }}"
+      when: ansible_os_family == "Archlinux"
+    
+    # ==================== ALPINE LINUX SECTION ====================
+    - name: Alpine - List installed packages count
+      shell: apk info | wc -l
+      register: alpine_installed_count
+      changed_when: false
+      when: ansible_os_family == "Alpine"
+      ignore_errors: yes
+      
+    - name: Alpine - Get current kernel
+      shell: uname -r
+      register: alpine_current_kernel
+      changed_when: false
+      when: ansible_os_family == "Alpine"
+      
+    - name: Alpine - Display installed packages summary
+      debug:
+        msg:
+          - ""
+          - "=== ALPINE LINUX INSTALLED PACKAGES ==="
+          - "Total installed packages: {{ alpine_installed_count.stdout }}"
+          - "Current kernel: {{ alpine_current_kernel.stdout }}"
+      register: alpine_packages_summary
+      when: ansible_os_family == "Alpine"
+      
+    - name: Alpine - Set packages summary as job output
+      set_stats:
+        data:
+          alpine_total_packages: "{{ alpine_installed_count.stdout }}"
+          alpine_current_kernel: "{{ alpine_current_kernel.stdout }}"
+        per_host: yes
+      when: ansible_os_family == "Alpine"
+      
+    - name: Alpine - Update package index
+      command: apk update
+      changed_when: false
+      when: ansible_os_family == "Alpine"
+      
+    - name: Alpine - List available updates
+      shell: apk version -l '<'
+      register: alpine_updates_list
+      changed_when: false
+      when: ansible_os_family == "Alpine"
+      
+    - name: Alpine - Count available updates
+      shell: apk version -l '<' | wc -l
+      register: alpine_updates_count
+      changed_when: false
+      when: ansible_os_family == "Alpine"
+      
+    - name: Alpine - Display available updates
+      debug:
+        msg:
+          - ""
+          - "=== ALPINE LINUX AVAILABLE UPDATES ==="
+          - "Total available updates: {{ alpine_updates_count.stdout | default('0') }}"
+          - ""
+          - "Update Details:"
+          - "{{ alpine_updates_list.stdout_lines }}"
+      when: ansible_os_family == "Alpine"
+    
+    # ==================== FINAL SUMMARY ====================
+    - name: Set total updates count for summary
+      set_fact:
+        total_updates: >-
+          {{
+            windows_available_updates.found_update_count | default(0) if ansible_os_family == 'Windows'
+            else rhel_updates_count.stdout | default(0) if ansible_os_family == 'RedHat'
+            else debian_updates_count.stdout | default(0) if ansible_os_family == 'Debian'
+            else suse_updates_count.stdout | default(0) if ansible_os_family == 'Suse'
+            else arch_updates_count.stdout | default(0) if ansible_os_family == 'Archlinux'
+            else alpine_updates_count.stdout | default(0) if ansible_os_family == 'Alpine'
+            else 0
+          }}
+        reboot_required: >-
+          {{
+            (windows_reboot_status.stdout | default('') | regex_search('YES')) or
+            (rhel_reboot_check.rc | default(0) == 1) or
+            (debian_reboot_file.stat.exists | default(false))
+          }}
+    
+    - name: Display final summary
+      debug:
+        msg:
+          - ""
+          - "============================================"
+          - "    PATCH CHECK SUMMARY"
+          - "============================================"
+          - "Target: {{ target_hostname }}"
+          - "OS: {{ ansible_distribution }} {{ ansible_distribution_version | default('') }}"
+          - "Architecture: {{ ansible_architecture }}"
+          - "IP Address: {{ ansible_default_ipv4.address | default(ansible_ip_addresses[0] | default('N/A')) }}"
+          - ""
+          - "RESULTS:"
+          - "  Total Available Updates: {{ total_updates }}"
+          - "  Reboot Required: {{ 'YES' if reboot_required else 'NO' }}"
+          - ""
+          - "NOTE: This is a READ-ONLY check. No updates have been installed."
+          - "      To apply updates, use a different playbook or run updates manually."
+          - ""
+          - "Scan completed at: {{ ansible_date_time.iso8601 }}"
+          - "============================================"

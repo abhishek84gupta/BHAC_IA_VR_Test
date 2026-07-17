@@ -1,0 +1,45 @@
+---
+- name: Get smtp4dev mailbox usage
+  hosts: localhost
+  gather_facts: no
+
+  vars:
+    smtp4dev_url: "http://clm-pun-su0nat.bmc.com:3000"
+
+  tasks:
+    - name: Fetch message list
+      uri:
+        url: "{{ smtp4dev_url }}/api/messages?page=1&pageSize=1000"
+        method: GET
+        return_content: yes
+      register: message_list
+
+    - name: Fetch message details
+      uri:
+        url: "{{ smtp4dev_url }}/api/messages/{{ item.id }}"
+        method: GET
+        return_content: yes
+      loop: "{{ message_list.json.results }}"
+      register: message_details
+
+    - name: Calculate mailbox size (bytes)
+      set_fact:
+        mailbox_size_bytes: >-
+          {{
+            message_details.results
+            | map(attribute='json.parts')
+            | flatten
+            | map(attribute='size')
+            | sum
+          }}
+
+    - name: Convert mailbox size to MB
+      set_fact:
+        mailbox_size_mb: "{{ (mailbox_size_bytes | float / 1024 / 1024) | round(2) }}"
+
+    - name: Show mailbox usage
+      debug:
+        msg:
+          - "Messages count: {{ message_list.json.rowCount }}"
+          - "Mailbox size (bytes): {{ mailbox_size_bytes }}"
+          - "Mailbox size (MB): {{ mailbox_size_mb }}"

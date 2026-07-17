@@ -1,0 +1,124 @@
+---
+# Additional Playbook: Database Backup
+# Purpose: Backup MySQL/PostgreSQL databases
+# Usage: ansible-playbook playbooks/14-database-backup.yml
+
+- name: Backup databases on remote servers
+  hosts: databases
+  become: yes
+  
+  vars:
+    backup_dir: "/backup/databases"
+    retention_days: 7
+    compress_backup: yes
+    backup_mysql: yes
+    backup_postgresql: yes
+    mysql_user: "root"
+    mysql_password: ""  # Use vault for production
+    postgres_user: "postgres"
+    
+  tasks:
+    - name: Create backup directory
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: '0700'
+        owner: root
+        group: root
+        
+    - name: Get current timestamp
+      set_fact:
+        backup_timestamp: "{{ ansible_date_time.epoch }}"
+        
+    - name: Check if MySQL is installed
+      shell: command -v mysql
+      register: mysql_installed
+      ignore_errors: yes
+      changed_when: false
+      
+    - name: Backup all MySQL databases
+      shell: |
+        mysqldump --all-databases \
+        --single-transaction \
+        --quick \
+        --lock-tables=false \
+        --routines \
+        --triggers \
+        --events \
+        {% if mysql_password != '' %}--password={{ mysql_password }}{% endif %} \
+        > {{ backup_dir }}/mysql_all_{{ backup_timestamp }}.sql
+      when: 
+        - backup_mysql
+        - mysql_installed.rc == 0
+      no_log: yes
+      register: mysql_backup
+      
+    - name: Compress MySQL backup
+      archive:
+        path: "{{ backup_dir }}/mysql_all_{{ backup_timestamp }}.sql"
+        dest: "{{ backup_dir }}/mysql_all_{{ backup_timestamp }}.sql.gz"
+        format: gz
+        remove: yes
+      when: 
+        - compress_backup
+        - mysql_backup is changed
+        
+    - name: Check if PostgreSQL is installed
+      shell: command -v psql
+      register: postgres_installed
+      ignore_errors: yes
+      changed_when: false
+      
+    - name: Get list of PostgreSQL databases
+      become_user: "{{ postgres_user }}"
+      shell: psql -t -c "SELECT datname FROM pg_database WHERE datistemplate = false AND datname != 'postgres';"
+      register: postgres_databases
+      when: 
+        - backup_postgresql
+        - postgres_installed.rc == 0
+      changed_when: false
+      
+    - name: Backup PostgreSQL databases
+      become_user: "{{ postgres_user }}"
+      shell: |
+        pg_dump {{ item | trim }} > {{ backup_dir }}/postgres_{{ item | trim }}_{{ backup_timestamp }}.sql
+      loop: "{{ postgres_databases.stdout_lines }}"
+      when: 
+        - backup_postgresql
+        - postgres_installed.rc == 0
+        - postgres_databases.stdout_lines | length > 0
+      register: postgres_backup
+      
+    - name: Compress PostgreSQL backups
+      archive:
+        path: "{{ backup_dir }}/postgres_{{ item | trim }}_{{ backup_timestamp }}.sql"
+        dest: "{{ backup_dir }}/postgres_{{ item | trim }}_{{ backup_timestamp }}.sql.gz"
+        format: gz
+        remove: yes
+      loop: "{{ postgres_databases.stdout_lines }}"
+      when: 
+        - compress_backup
+        - postgres_backup is changed
+        - postgres_databases.stdout_lines | length > 0
+        
+    - name: Remove old backups
+      shell: find {{ backup_dir }} -name "*.sql*" -mtime +{{ retention_days }} -delete
+      changed_when: false
+      
+    - name: Get backup statistics
+      shell: |
+        echo "Total backups: $(ls -1 {{ backup_dir }} | wc -l)"
+        echo "Total size: $(du -sh {{ backup_dir }} | cut -f1)"
+        echo "Latest backup: $(ls -t {{ backup_dir }} | head -1)"
+      register: backup_stats
+      changed_when: false
+      
+    - name: Display backup summary
+      debug:
+        msg:
+          - "=== DATABASE BACKUP SUMMARY for {{ inventory_hostname }} ==="
+          - "{{ backup_stats.stdout_lines }}"
+          - "MySQL backed up: {{ 'YES' if (backup_mysql and mysql_installed.rc == 0) else 'NO' }}"
+          - "PostgreSQL backed up: {{ 'YES' if (backup_postgresql and postgres_installed.rc == 0) else 'NO' }}"
+          - "Compressed: {{ 'YES' if compress_backup else 'NO' }}"
+          - "Retention: {{ retention_days }} days"

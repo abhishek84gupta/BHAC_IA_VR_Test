@@ -1,0 +1,146 @@
+---
+# Additional Playbook: Security Hardening
+# Purpose: Implement basic security hardening measures
+# Usage: ansible-playbook playbooks/11-security-hardening.yml
+
+- name: Security hardening on Linux servers
+  hosts: all
+  become: yes
+  
+  vars:
+    disable_root_login: yes
+    configure_fail2ban: yes
+    update_system: yes
+    configure_automatic_updates: no
+    
+  tasks:
+    - name: Update package cache
+      package:
+        update_cache: yes
+      when: update_system
+      
+    - name: Upgrade all packages
+      package:
+        name: '*'
+        state: latest
+      when: update_system
+      async: 1800
+      poll: 10
+      
+    - name: Disable root SSH login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^PermitRootLogin'
+        line: 'PermitRootLogin no'
+        state: present
+        backup: yes
+      when: disable_root_login
+      notify: restart sshd
+      
+    - name: Disable password authentication (force key-based)
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+        state: present
+      notify: restart sshd
+      
+    - name: Set SSH protocol to 2
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^Protocol'
+        line: 'Protocol 2'
+        state: present
+      notify: restart sshd
+      
+    - name: Install fail2ban
+      package:
+        name: fail2ban
+        state: present
+      when: configure_fail2ban
+      
+    - name: Start and enable fail2ban
+      systemd:
+        name: fail2ban
+        state: started
+        enabled: yes
+      when: configure_fail2ban
+      
+    - name: Configure fail2ban for SSH
+      copy:
+        content: |
+          [sshd]
+          enabled = true
+          port = ssh
+          filter = sshd
+          logpath = /var/log/auth.log
+          maxretry = 3
+          bantime = 3600
+        dest: /etc/fail2ban/jail.local
+        mode: '0644'
+      when: configure_fail2ban
+      notify: restart fail2ban
+      
+    - name: Set strong password policy
+      lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+      loop:
+        - { regexp: '^minlen', line: 'minlen = 12' }
+        - { regexp: '^dcredit', line: 'dcredit = -1' }
+        - { regexp: '^ucredit', line: 'ucredit = -1' }
+        - { regexp: '^lcredit', line: 'lcredit = -1' }
+        - { regexp: '^ocredit', line: 'ocredit = -1' }
+      
+    - name: Configure automatic security updates (Ubuntu/Debian)
+      package:
+        name: unattended-upgrades
+        state: present
+      when: 
+        - configure_automatic_updates
+        - ansible_os_family == "Debian"
+        
+    - name: Enable unattended upgrades
+      copy:
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Download-Upgradeable-Packages "1";
+          APT::Periodic::AutocleanInterval "7";
+          APT::Periodic::Unattended-Upgrade "1";
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        mode: '0644'
+      when: 
+        - configure_automatic_updates
+        - ansible_os_family == "Debian"
+        
+    - name: Check for unnecessary services
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop:
+        - telnet
+        - rsh
+        - rlogin
+      ignore_errors: yes
+      
+    - name: Display security status
+      debug:
+        msg:
+          - "Security hardening completed on {{ inventory_hostname }}"
+          - "Root SSH login: {{ 'disabled' if disable_root_login else 'enabled' }}"
+          - "Fail2ban: {{ 'configured' if configure_fail2ban else 'not configured' }}"
+          - "System updates: {{ 'applied' if update_system else 'skipped' }}"
+          
+  handlers:
+    - name: restart sshd
+      systemd:
+        name: sshd
+        state: restarted
+        
+    - name: restart fail2ban
+      systemd:
+        name: fail2ban
+        state: restarted

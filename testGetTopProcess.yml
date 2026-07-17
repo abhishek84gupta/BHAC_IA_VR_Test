@@ -1,0 +1,194 @@
+---
+# Playbook: Get Top Processes by Memory and CPU
+# Purpose: Connect to remote host and retrieve top 10 processes by memory and CPU usage
+# 
+# CLI Examples:
+#   ansible-playbook playbooks/Get-Top-Processes.yml -e "target_host=192.168.1.100 ansible_user=admin" -k
+#   ansible-playbook playbooks/Get-Top-Processes.yml -e "target_host=webserver.example.com top_count=5 ansible_user=root" -k
+#   ansible-playbook playbooks/Get-Top-Processes.yml -e "target_host=localhost"
+# 
+# AWX/Tower Example:
+#   Extra Variables: {"target_host": "webserver.example.com", "ansible_user": "admin", "top_count": 10}
+#
+# Note: This playbook dynamically adds the target host to inventory at runtime,
+#       so no pre-configured inventory is required.
+#
+
+# Play 1: Add target host to runtime inventory (runs locally, no output on target)
+- name: Initialize target host
+  hosts: localhost
+  gather_facts: no
+  connection: local
+  
+  tasks:
+    - name: Validate target_host is provided
+      fail:
+        msg: "❌ ERROR: target_host is required. Use -e 'target_host=hostname.example.com'"
+      when: target_host is not defined or target_host == ""
+
+    - name: Add target host to runtime inventory
+      add_host:
+        name: "{{ target_host }}"
+        groups: target_servers
+        ansible_host: "{{ target_host }}"
+        ansible_user: "{{ ansible_user | default(omit) }}"
+        ansible_port: "{{ ansible_port | default(22) }}"
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+        ansible_connection: "{{ 'local' if target_host in ['localhost', '127.0.0.1'] else 'ssh' }}"
+
+# Play 2: Execute on target host ONLY
+- name: Get top processes by memory and CPU usage
+  hosts: target_servers
+  gather_facts: yes
+  
+  vars:
+    default_top_count: 10
+    
+  tasks:
+    - name: Set process configuration (use extra_vars or defaults)
+      set_fact:
+        top_count: "{{ top_count | default(default_top_count) | int }}"
+
+    - name: Display configuration
+      debug:
+        msg:
+          - "🎯 Target Host: {{ inventory_hostname }}"
+          - "📊 Top Process Count: {{ top_count }}"
+          - "🖥️  OS: {{ ansible_distribution | default('Unknown') }} {{ ansible_distribution_version | default('') }}"
+
+    - name: Validate top_count
+      fail:
+        msg: "❌ ERROR: Invalid top_count '{{ top_count }}'. Must be between 1-100"
+      when: top_count | int < 1 or top_count | int > 100
+
+    # Get top processes by MEMORY usage
+    - name: Get top processes by memory usage
+      shell: |
+        ps aux --sort=-%mem | head -n {{ top_count | int + 1 }} | tail -n {{ top_count }} | \
+        awk '{printf "{\"pid\":\"%s\",\"user\":\"%s\",\"cpu\":\"%s\",\"mem\":\"%s\",\"vsz\":\"%s\",\"rss\":\"%s\",\"command\":\"%s\"}\n", $2, $1, $3, $4, $5, $6, $11}'
+      register: top_memory_raw
+      changed_when: false
+
+    - name: Parse top memory processes
+      set_fact:
+        top_memory_processes: "{{ top_memory_raw.stdout_lines | map('from_json') | list }}"
+
+    # Get top processes by CPU usage
+    - name: Get top processes by CPU usage
+      shell: |
+        ps aux --sort=-%cpu | head -n {{ top_count | int + 1 }} | tail -n {{ top_count }} | \
+        awk '{printf "{\"pid\":\"%s\",\"user\":\"%s\",\"cpu\":\"%s\",\"mem\":\"%s\",\"vsz\":\"%s\",\"rss\":\"%s\",\"command\":\"%s\"}\n", $2, $1, $3, $4, $5, $6, $11}'
+      register: top_cpu_raw
+      changed_when: false
+
+    - name: Parse top CPU processes
+      set_fact:
+        top_cpu_processes: "{{ top_cpu_raw.stdout_lines | map('from_json') | list }}"
+
+    # Get system memory info
+    - name: Get system memory information
+      shell: |
+        free -m | awk 'NR==2{printf "{\"total_mb\":\"%s\",\"used_mb\":\"%s\",\"free_mb\":\"%s\",\"usage_percent\":\"%.2f\"}", $2, $3, $4, $3*100/$2}'
+      register: memory_info_raw
+      changed_when: false
+
+    - name: Parse memory info
+      set_fact:
+        memory_info: "{{ memory_info_raw.stdout | from_json }}"
+
+    # Get system CPU load
+    - name: Get system load average
+      shell: |
+        cat /proc/loadavg | awk '{printf "{\"load_1min\":\"%s\",\"load_5min\":\"%s\",\"load_15min\":\"%s\"}", $1, $2, $3}'
+      register: load_avg_raw
+      changed_when: false
+
+    - name: Parse load average
+      set_fact:
+        load_average: "{{ load_avg_raw.stdout | from_json }}"
+
+    # Get CPU count for context
+    - name: Get CPU count
+      shell: nproc
+      register: cpu_count_raw
+      changed_when: false
+
+    - name: Set CPU count
+      set_fact:
+        cpu_count: "{{ cpu_count_raw.stdout | int }}"
+
+    # Get total process count
+    - name: Get total process count
+      shell: ps aux | wc -l
+      register: process_count_raw
+      changed_when: false
+
+    - name: Set process count
+      set_fact:
+        total_process_count: "{{ process_count_raw.stdout | int - 1 }}"
+
+    # Display results
+    - name: Display top processes by MEMORY
+      debug:
+        msg:
+          - "=================================="
+          - "  TOP {{ top_count }} PROCESSES BY MEMORY"
+          - "=================================="
+          - "{% for proc in top_memory_processes %}{{ loop.index }}. PID: {{ proc.pid }} | User: {{ proc.user }} | MEM: {{ proc.mem }}% | CPU: {{ proc.cpu }}% | {{ proc.command }}{% if not loop.last %}\n{% endif %}{% endfor %}"
+
+    - name: Display top processes by CPU
+      debug:
+        msg:
+          - "=================================="
+          - "  TOP {{ top_count }} PROCESSES BY CPU"
+          - "=================================="
+          - "{% for proc in top_cpu_processes %}{{ loop.index }}. PID: {{ proc.pid }} | User: {{ proc.user }} | CPU: {{ proc.cpu }}% | MEM: {{ proc.mem }}% | {{ proc.command }}{% if not loop.last %}\n{% endif %}{% endfor %}"
+
+    - name: Display system summary
+      debug:
+        msg:
+          - "=================================="
+          - "       SYSTEM SUMMARY"
+          - "=================================="
+          - "Host: {{ inventory_hostname }}"
+          - "OS: {{ ansible_distribution | default('Unknown') }} {{ ansible_distribution_version | default('') }}"
+          - "CPU Cores: {{ cpu_count }}"
+          - "Load Average: {{ load_average.load_1min }} / {{ load_average.load_5min }} / {{ load_average.load_15min }}"
+          - "Memory: {{ memory_info.used_mb }} MB used / {{ memory_info.total_mb }} MB total ({{ memory_info.usage_percent }}%)"
+          - "Total Processes: {{ total_process_count }}"
+          - "=================================="
+
+    # Set stats for AWX/Tower job template caller
+    - name: Set process statistics for job template caller
+      set_stats:
+        data:
+          target_host: "{{ inventory_hostname }}"
+    
+          top_memory_processes_summary: >-
+            {% for p in top_memory_processes[:5] %}PID={{ p.pid }},MEM={{ p.mem }}%,CMD={{ p.command }}{% if not loop.last %} | {% endif %}{% endfor %}
+    
+          top_cpu_processes_summary: >-
+            {% for p in top_cpu_processes[:5] %}PID={{ p.pid }},CPU={{ p.cpu }}%,CMD={{ p.command }}{% if not loop.last %} | {% endif %}{% endfor %}
+    
+          status: "SUCCESS"
+    
+        aggregate: no
+        per_host: no
+
+    - name: Final summary
+      debug:
+        msg:
+          - "=================================="
+          - "   PROCESS COLLECTION COMPLETE"
+          - "=================================="
+          - "Host: {{ inventory_hostname }}"
+          - "Top Processes Collected: {{ top_count }}"
+          - "Top Memory Consumer: {{ top_memory_processes[0].command if top_memory_processes | length > 0 else 'N/A' }} ({{ top_memory_processes[0].mem if top_memory_processes | length > 0 else '0' }}%)"
+          - "Top CPU Consumer: {{ top_cpu_processes[0].command if top_cpu_processes | length > 0 else 'N/A' }} ({{ top_cpu_processes[0].cpu if top_cpu_processes | length > 0 else '0' }}%)"
+          - "=================================="
+          - "📊 Stats have been set and can be retrieved by the job template caller"
+          - ""
+          - "Stats exported:"
+          - "  - top_memory_processes (JSON array of {{ top_count }} processes)"
+          - "  - top_cpu_processes (JSON array of {{ top_count }} processes)"
+          - "  - System info (memory, CPU, load averages)"

@@ -1,0 +1,14 @@
+---
+- name: Add DiskSpace to Server
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Log success message
+      debug:
+        msg: "Successfully expanded disk capacity on the server."
+
+    - name: Force success
+      command: /bin/true
+      changed_when: false
+      failed_when: false

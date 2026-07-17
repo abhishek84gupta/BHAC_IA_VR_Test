@@ -1,0 +1,90 @@
+---
+# Playbook: Fetch Kubernetes pod logs via REST API
+# Purpose: Call the cluster API (Rancher proxy) to retrieve logs for a named pod in a namespace
+#
+# Required extra_vars:
+#   - k8s_namespace: Kubernetes namespace
+#   - k8s_pod_name: Pod name
+#
+# Token: hardcoded below (override with -e k8s_token=... if needed). Rotate if exposed.
+#
+# Optional extra_vars:
+#   - k8s_container: Container name (multi-container pods)
+#   - k8s_tail_lines: Recent log line count (integer)
+#   - k8s_previous: true to get logs from the previous crashed instance
+#
+# CLI example:
+#   ansible-playbook playbooks/Get-K8s-Pod-Logs.yml \
+#     -e "k8s_namespace=default" \
+#     -e "k8s_pod_name=my-pod"
+#
+# No inventory: runs on localhost only.
+
+- name: Fetch pod logs from Kubernetes API
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    k8s_api_base: "https://aus-itrnch-01.k8s.bmc.com/k8s/clusters/c-gbl9h"
+    k8s_token: "kubeconfig-u-a7m2uqizmv7c9bj:7vw2dpqlldhjbv8t6269q9qfvbwvgx65tn2n6c2k2p9bf9kxjqs46b"
+
+  tasks:
+    - name: Validate required extra_vars
+      fail:
+        msg: "Set k8s_namespace and k8s_pod_name via extra_vars (or AWX survey)."
+      when: >
+        k8s_namespace is not defined or k8s_namespace | length == 0 or
+        k8s_pod_name is not defined or k8s_pod_name | length == 0
+
+    - name: Initialize optional query parts
+      set_fact:
+        _log_query_parts: []
+
+    - name: Add container to query
+      set_fact:
+        _log_query_parts: "{{ _log_query_parts + ['container=' ~ (k8s_container | urlencode)] }}"
+      when: k8s_container is defined and k8s_container | length > 0
+
+    - name: Add tailLines to query
+      set_fact:
+        _log_query_parts: "{{ _log_query_parts + ['tailLines=' ~ (k8s_tail_lines | string)] }}"
+      when: k8s_tail_lines is defined
+
+    - name: Add previous to query
+      set_fact:
+        _log_query_parts: "{{ _log_query_parts + ['previous=true'] }}"
+      when: k8s_previous | default(false) | bool
+
+    - name: Build pod log URL
+      set_fact:
+        k8s_log_url: >-
+          {{ k8s_api_base }}/api/v1/namespaces/{{ k8s_namespace | urlencode }}/pods/{{ k8s_pod_name | urlencode }}/log
+          {{- ('?' ~ (_log_query_parts | join('&'))) if (_log_query_parts | length) > 0 else '' }}
+
+    - name: Fetch pod logs via Kubernetes REST API
+      uri:
+        url: "{{ k8s_log_url }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ k8s_token }}"
+          Accept: "text/plain, */*"
+        return_content: true
+        status_code: [200]
+        validate_certs: true
+      register: pod_log_response
+
+    - name: Show pod logs
+      debug:
+        msg: "{{ pod_log_response.content }}"
+
+    - name: Set stats for job template caller
+      set_stats:
+        data:
+          k8s_namespace: "{{ k8s_namespace }}"
+          k8s_pod_name: "{{ k8s_pod_name }}"
+          # Use .splitlines() (no Jinja 'split' filter — missing on some Ansible versions)
+          log_line_count: "{{ (pod_log_response.content | default('', true)).splitlines() | length }}"
+          status: "SUCCESS"
+        aggregate: false
+        per_host: false
