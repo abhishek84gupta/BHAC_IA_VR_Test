@@ -1,4 +1,4 @@
-- name: Install update on Red Hat Enterprise Linux
+- name: Install update on Red Hat Enterprise Linux1
   hosts: all
   become: yes
   tasks:
