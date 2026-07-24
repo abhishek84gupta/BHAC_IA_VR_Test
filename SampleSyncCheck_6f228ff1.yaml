@@ -1,0 +1,18 @@
+- name: Install update on Red Hat Enterprise Linux
+  hosts: all
+  become: yes
+  tasks:
+    - name: Check if the update file exists
+      stat:
+        path: /path/to/update_file.rpm
+      register: update_file
+
+    - name: Install the update file
+      yum:
+        name: "{{ update_file.path }}"
+        state: present
+      when: update_file.stat.exists
+
+    - name: Notify user about update installation
+      debug:
+        msg: "Update installation completed successfully."
