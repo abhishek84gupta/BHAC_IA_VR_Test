@@ -1,28 +1,9 @@
-- name: Install or uninstall software on RHEL servers
-  hosts: "{{ target_hosts | all }}"
-  become: yes
-
-  vars:
-    software_name: "vim"
-    sf_action: "install"
-
+- name: My first play
+  hosts: "{{ target_hosts | default('all') }}"
   tasks:
-    - name: Ensure required variables are provided
-      fail:
-        msg: "You must provide 'software_name' and 'sf_action' variables."
-      when: software_name is not defined or sf_action is not defined
-
-    - name: Validate sf_action parameter
-      fail:
-        msg: "Invalid action '{{ sf_action }}'. Allowed values are 'install' or 'uninstall'."
-      when: sf_action not in ['install', 'uninstall']
-
-    - name: Install or uninstall software based on action
-      yum:
-        name: "{{ software_name }}"
-        state: "{{ 'present' if sf_action == 'install' else 'absent' }}"
-      register: result
-
-    - name: Show result
-      debug:
-        msg: "Software {{ software_name }} {{ 'installed' if sf_action == 'install' else 'removed' }}"
+   - name: Ping my hosts
+     ansible.builtin.ping:
+ 
+   - name: Print message
+     ansible.builtin.debug:
+      msg: Hello world
