@@ -3,8 +3,8 @@
   become: yes
 
   vars:
-    software_name: "{{ software_name }}"
-    sf_action: "{{ sf_action }}"
+    software_name: "vim"
+    sf_action: "install"
 
   tasks:
     - name: Ensure required variables are provided
