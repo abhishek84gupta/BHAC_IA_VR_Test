@@ -9,7 +9,7 @@
   tasks:
     - name: Ensure required variables are provided
       fail:
-        msg: "You must1 provide 'software_name' and 'sf_action' variables."
+        msg: "You must provide 'software_name' and 'sf_action' variables."
       when: software_name is not defined or sf_action is not defined
 
     - name: Validate sf_action parameter
