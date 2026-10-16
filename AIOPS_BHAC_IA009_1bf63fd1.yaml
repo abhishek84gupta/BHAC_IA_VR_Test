@@ -1,4 +1,4 @@
-- name: My first play
+- name: My first play1
   hosts: "{{ target_hosts | default('all') }}"
   tasks:
    - name: Ping my hosts
